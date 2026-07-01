@@ -137,16 +137,8 @@ def load_config(config_path: str | Path) -> AppConfig:
     paths_raw = _require_table(raw, "paths")
     services_raw = raw.get("services", {})
 
-    dbrepair_archive = _resolve_existing_file(
-        base_dir,
-        _require_str(paths_raw, "dbrepair_archive"),
-        "paths.dbrepair_archive",
-    )
-    empty_datadir_archive = _resolve_existing_file(
-        base_dir,
-        _require_str(paths_raw, "empty_datadir_archive"),
-        "paths.empty_datadir_archive",
-    )
+    dbrepair_archive = _resolve_path(base_dir, _require_str(paths_raw, "dbrepair_archive"))
+    empty_datadir_archive = _resolve_path(base_dir, _require_str(paths_raw, "empty_datadir_archive"))
     local_backup_dir = _resolve_path(base_dir, _require_str(paths_raw, "local_backup_dir"))
 
     remote_dbrepair_dir_name = paths_raw.get("remote_dbrepair_dir_name") or _derive_dir_name(
@@ -250,13 +242,6 @@ def _optional_str(raw: dict, key: str) -> str | None:
     if not isinstance(value, str):
         raise ConfigError(f"Value must be string: {key}")
     return value.strip() or None
-
-
-def _resolve_existing_file(base_dir: Path, raw_path: str, field_name: str) -> Path:
-    path = _resolve_path(base_dir, raw_path)
-    if not path.is_file():
-        raise ConfigError(f"File referenced by {field_name} does not exist: {path}")
-    return path
 
 
 def _resolve_path(base_dir: Path, raw_path: str) -> Path:

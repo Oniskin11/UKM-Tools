@@ -212,6 +212,12 @@ class DbRepairWorkflow:
         paths = self.config.paths
         db = self.config.database
 
+        if not paths.dbrepair_archive.is_file():
+            raise WorkflowError(
+                f"Архив dbrepair не найден: {paths.dbrepair_archive} "
+                "(проверьте paths.dbrepair_archive в config.toml)."
+            )
+
         remote.run(f"mkdir -p {shlex.quote(paths.remote_tmp_dir)}")
         self._wait_for_remote_path(
             remote,
@@ -365,6 +371,12 @@ class DbRepairWorkflow:
     def _step_replace_datadir(self, remote: RemoteClient, session: WorkflowSession) -> None:
         del session
         paths = self.config.paths
+
+        if not paths.empty_datadir_archive.is_file():
+            raise WorkflowError(
+                f"Архив пустого datadir не найден: {paths.empty_datadir_archive} "
+                "(проверьте paths.empty_datadir_archive в config.toml)."
+            )
 
         remote.run(f"rm -rf {shlex.quote(paths.remote_mysql_var_dir)}", use_sudo=True)
         self._wait_for_remote_absent(

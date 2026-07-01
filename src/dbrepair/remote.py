@@ -6,16 +6,13 @@ import posixpath
 import shlex
 import threading
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any
 import uuid
 
 try:
     import paramiko
 except ModuleNotFoundError:  # pragma: no cover - optional until runtime
     paramiko = None
-
-if TYPE_CHECKING:  # pragma: no cover
-    import paramiko as paramiko_types
 
 from .config import ConnectionConfig
 
@@ -174,7 +171,7 @@ class RemoteClient:
             return result.stdout
 
         with self._require_sftp().file(remote_path, mode="r") as remote_file:
-            return remote_file.read().decode("utf-8")
+            return remote_file.read().decode("utf-8", errors="replace")
 
     def write_text(self, remote_path: str, content: str, *, use_sudo: bool = False) -> None:
         self._raise_if_cancelled()

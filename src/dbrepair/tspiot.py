@@ -43,6 +43,12 @@ DEFAULT_TARGET_BASES: tuple[str, ...] = ("/usr/local/ukmclient", "/usr/local/lil
 ProgressCallback = Callable[[TsPiotStep, str, str | None], None]
 
 
+def _last_line(text: str) -> str:
+    """Последняя непустая строка вывода (защита от баннеров login-shell в stdout)."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
 def _download_command(url: str, dest: str) -> str:
     quoted_url = shlex.quote(url)
     quoted_dest = shlex.quote(dest)
@@ -53,6 +59,28 @@ def _download_command(url: str, dest: str) -> str:
         f"wget -q -O {quoted_dest} {quoted_url}; "
         "else echo 'no curl/wget on host' >&2; exit 127; fi"
     )
+
+
+def _detect_on(
+    remote: RemoteClient,
+    logger,
+    candidate_bases: Sequence[str],
+) -> tuple[str, str | None, str]:
+    """Определить архитектуру и каталог установки, используя открытое соединение."""
+    uname = remote.run("uname -m", check=False).stdout.strip()
+    architecture = "x64" if "64" in uname.lower() else "x86"
+    logger.info("Detected machine '%s' -> architecture %s", uname or "?", architecture)
+
+    target_base: str | None = None
+    for base in candidate_bases:
+        result = remote.run(f"test -d {shlex.quote(base)}", use_sudo=True, check=False)
+        if result.exit_status == 0:
+            target_base = base
+            logger.info("Detected target directory %s", base)
+            break
+    if target_base is None:
+        logger.warning("No known target directory found among: %s", ", ".join(candidate_bases))
+    return architecture, target_base, uname
 
 
 def detect_environment(
@@ -67,21 +95,7 @@ def detect_environment(
     Возвращает (architecture, target_base | None, raw_uname).
     """
     with RemoteClient(config.connection, logger, cancel_event=cancel_event) as remote:
-        uname = remote.run("uname -m", check=False).stdout.strip()
-        architecture = "x64" if "64" in uname.lower() else "x86"
-        logger.info("Detected machine '%s' -> architecture %s", uname or "?", architecture)
-
-        target_base: str | None = None
-        for base in candidate_bases:
-            result = remote.run(f"test -d {shlex.quote(base)}", use_sudo=True, check=False)
-            if result.exit_status == 0:
-                target_base = base
-                logger.info("Detected target directory %s", base)
-                break
-        if target_base is None:
-            logger.warning("No known target directory found among: %s", ", ".join(candidate_bases))
-
-    return architecture, target_base, uname
+        return _detect_on(remote, logger, candidate_bases)
 
 
 def reboot_host(
@@ -93,14 +107,17 @@ def reboot_host(
     """Перезагрузить кассу. Соединение при этом обрывается — это ожидаемо."""
     with RemoteClient(config.connection, logger, cancel_event=cancel_event) as remote:
         logger.info("Sending reboot command to %s", config.connection.host)
-        # Перезагрузка с задержкой в фоне, чтобы команда успела вернуться до разрыва SSH.
+        # setsid + nohup, чтобы фоновая перезагрузка пережила закрытие SSH-сессии (SIGHUP).
         remote.run(
-            "(sleep 1; (reboot || shutdown -r now)) >/dev/null 2>&1 &",
+            "setsid sh -c 'sleep 2; reboot || shutdown -r now' >/dev/null 2>&1 < /dev/null &",
             use_sudo=True,
             check=False,
             timeout=15,
         )
     logger.info("Reboot command sent.")
+
+
+EnvironmentCallback = Callable[[str, str | None], None]
 
 
 class TsPiotInstaller:
@@ -113,6 +130,9 @@ class TsPiotInstaller:
         architecture: str,
         target_base: str,
         cancel_event: threading.Event | None = None,
+        auto_detect: bool = False,
+        on_detect: EnvironmentCallback | None = None,
+        candidate_bases: Sequence[str] = DEFAULT_TARGET_BASES,
     ):
         if config.tspiot is None:
             raise TsPiotError("В config.toml отсутствует секция [tspiot].")
@@ -124,6 +144,9 @@ class TsPiotInstaller:
         self.target_base = target_base.rstrip("/")
         self.owner = self.tspiot.resolve_owner(self.target_base)
         self.cancel_event = cancel_event
+        self.auto_detect = auto_detect
+        self.on_detect = on_detect
+        self.candidate_bases = candidate_bases
 
     @property
     def target_binary(self) -> str:
@@ -161,9 +184,20 @@ class TsPiotInstaller:
 
         self.logger.info("Starting TS PIoT installation on %s", self.config.connection.host)
         self.logger.info("Source web server: %s", self.base_url)
-        self.logger.info("Target: %s (arch %s, owner %s)", self.target_base, self.architecture, self.owner)
         self._check_cancelled()
         with RemoteClient(self.config.connection, self.logger, cancel_event=self.cancel_event) as remote:
+            if self.auto_detect:
+                arch, target, _ = _detect_on(remote, self.logger, self.candidate_bases)
+                if arch:
+                    self.architecture = arch
+                if target:
+                    self.target_base = target.rstrip("/")
+                self.owner = self.tspiot.resolve_owner(self.target_base)
+                if self.on_detect is not None:
+                    self.on_detect(self.architecture, target)
+            self.logger.info(
+                "Target: %s (arch %s, owner %s)", self.target_base, self.architecture, self.owner
+            )
             for step in steps:
                 self._check_cancelled()
                 self.logger.info("Step %s: %s", step.number, step.title)
@@ -243,12 +277,12 @@ class TsPiotInstaller:
             use_sudo=True,
             check=False,
         )
-        existing = listing.stdout.strip()
+        existing = _last_line(listing.stdout)
 
         if existing:
             # Права и владелец снимаются заранее, чтобы вернуть их после замены (mv меняет inode).
-            mode = remote.run(f"stat -c %a {shlex.quote(existing)}", use_sudo=True, check=False).stdout.strip()
-            owner = remote.run(f"stat -c %U:%G {shlex.quote(existing)}", use_sudo=True, check=False).stdout.strip()
+            mode = _last_line(remote.run(f"stat -c %a {shlex.quote(existing)}", use_sudo=True, check=False).stdout)
+            owner = _last_line(remote.run(f"stat -c %U:%G {shlex.quote(existing)}", use_sudo=True, check=False).stdout)
             target_so = existing
         else:
             mode = "0644"
@@ -321,6 +355,12 @@ class TsPiotInstaller:
         if expected is None:
             self.logger.warning(
                 "Нет .sha256 на сервере для %s: файл будет загружен без предварительной сверки.", url
+            )
+        elif installed is None:
+            self.logger.warning(
+                "Не удалось вычислить sha256 установленного файла %s "
+                "(нет sha256sum/openssl или файл отсутствует) — файл будет загружен.",
+                dest,
             )
 
         tmp = dest + ".dbrepair.new"
