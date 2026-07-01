@@ -10,6 +10,7 @@ from dbrepair.config import (
     WorkflowPaths,
 )
 from dbrepair.remote import CommandResult
+from dbrepair.distsource import Artifact
 from dbrepair.tspiot import TsPiotInstaller, _last_line
 
 
@@ -24,7 +25,7 @@ def test_resolve_owner_from_target():
     assert TsPiotConfig(owner="root:root").resolve_owner("/usr/local/ukmclient") == "root:root"
 
 
-def _make_installer():
+def _make_installer(source):
     config = AppConfig(
         connection=ConnectionConfig(host="h", username="root", password="p"),
         database=DatabaseConfig(name="db", password="x"),
@@ -40,10 +41,24 @@ def _make_installer():
     return TsPiotInstaller(
         config,
         logging.getLogger("test-tspiot"),
-        base_url="http://x/UKM/",
+        source=source,
         architecture="x64",
         target_base="/usr/local/ukmclient",
     )
+
+
+class _FakeSource:
+    def __init__(self, expected):
+        self._expected = expected
+
+    def describe(self):
+        return "fake"
+
+    def expected_sha256(self, artifact):
+        return self._expected
+
+    def deliver(self, remote, artifact, dest):
+        remote.run(f"DELIVER {dest}")
 
 
 class _FakeRemote:
@@ -62,24 +77,27 @@ class _FakeRemote:
             return CommandResult(command, 0, (value or "") + "\n", "")
         return CommandResult(command, 0, "", "")
 
-    def _downloaded(self):
-        return any(("curl" in c or "wget" in c or "mv -f" in c) for c in self.commands)
+    def _delivered(self):
+        return any(("DELIVER" in c or "mv -f" in c) for c in self.commands)
+
+
+_ARTIFACT = Artifact(version="1.0.0.0", filename="tspiot", locator="src://tspiot")
 
 
 def test_skip_download_when_hash_matches():
-    installer = _make_installer()
     digest = "a" * 64
+    installer = _make_installer(_FakeSource(digest))
     remote = _FakeRemote([digest])
-    changed = installer._download_and_install(remote, url="http://x/f", dest="/d/tspiot", expected=digest)
+    changed = installer._install(remote, _ARTIFACT, "/d/tspiot")
     assert changed is False
-    assert not remote._downloaded()
+    assert not remote._delivered()
 
 
 def test_download_when_hash_differs():
-    installer = _make_installer()
     old, new = "a" * 64, "b" * 64
-    # installed=old, tmp(after download)=new, expected=new
+    installer = _make_installer(_FakeSource(new))
+    # installed=old, tmp(after deliver)=new, expected=new
     remote = _FakeRemote([old, new])
-    changed = installer._download_and_install(remote, url="http://x/f", dest="/d/tspiot", expected=new)
+    changed = installer._install(remote, _ARTIFACT, "/d/tspiot")
     assert changed is True
-    assert remote._downloaded()
+    assert remote._delivered()

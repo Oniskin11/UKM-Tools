@@ -7,13 +7,12 @@ import re
 import shlex
 import threading
 
-from . import webdist
 from .config import AppConfig
+from .distsource import DistSource
 from .remote import OperationCancelledError, RemoteClient
 
 
 REMOTE_STATE_TIMEOUT_SECONDS = 60
-DOWNLOAD_TIMEOUT_SECONDS = 300
 
 
 class TsPiotError(RuntimeError):
@@ -47,18 +46,6 @@ def _last_line(text: str) -> str:
     """Последняя непустая строка вывода (защита от баннеров login-shell в stdout)."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines[-1] if lines else ""
-
-
-def _download_command(url: str, dest: str) -> str:
-    quoted_url = shlex.quote(url)
-    quoted_dest = shlex.quote(dest)
-    return (
-        "if command -v curl >/dev/null 2>&1; then "
-        f"curl -fsSL -o {quoted_dest} {quoted_url}; "
-        "elif command -v wget >/dev/null 2>&1; then "
-        f"wget -q -O {quoted_dest} {quoted_url}; "
-        "else echo 'no curl/wget on host' >&2; exit 127; fi"
-    )
 
 
 def _detect_on(
@@ -126,7 +113,7 @@ class TsPiotInstaller:
         config: AppConfig,
         logger,
         *,
-        base_url: str,
+        source: DistSource,
         architecture: str,
         target_base: str,
         cancel_event: threading.Event | None = None,
@@ -139,7 +126,7 @@ class TsPiotInstaller:
         self.config = config
         self.tspiot = config.tspiot
         self.logger = logger
-        self.base_url = base_url if base_url.endswith("/") else base_url + "/"
+        self.source = source
         self.architecture = architecture
         self.target_base = target_base.rstrip("/")
         self.owner = self.tspiot.resolve_owner(self.target_base)
@@ -183,7 +170,7 @@ class TsPiotInstaller:
         steps = [self.get_step(step_id) for step_id in step_ids]
 
         self.logger.info("Starting TS PIoT installation on %s", self.config.connection.host)
-        self.logger.info("Source web server: %s", self.base_url)
+        self.logger.info("Source: %s", self.source.describe())
         self._check_cancelled()
         with RemoteClient(self.config.connection, self.logger, cancel_event=self.cancel_event) as remote:
             if self.auto_detect:
@@ -229,20 +216,19 @@ class TsPiotInstaller:
         return handler(remote)
 
     def _step_tspiot(self, remote: RemoteClient) -> str | None:
-        url, version = webdist.tspiot_url(self.base_url, self.architecture)
-        self.logger.info("tspiot version %s: %s", version, url)
-        expected = webdist.fetch_sha256(url)
+        artifact = self.source.tspiot(self.architecture)
+        self.logger.info("tspiot version %s: %s", artifact.version, artifact.locator)
         target = self.target_binary
 
         remote.run(f"mkdir -p {shlex.quote(self.target_base)}", use_sudo=True)
-        changed = self._download_and_install(remote, url=url, dest=target, expected=expected)
+        changed = self._install(remote, artifact, target)
         if not changed:
-            return f"Уже актуально (v{version})"
+            return f"Уже актуально (v{artifact.version})"
 
         remote.run(f"chmod +x {shlex.quote(target)}", use_sudo=True)
         remote.run(f"chown {shlex.quote(self.owner)} {shlex.quote(target)}", use_sudo=True)
         self._wait_for_remote_path(remote, target, path_type="x", description=f"executable {target}")
-        return f"Установлено (v{version})"
+        return f"Установлено (v{artifact.version})"
 
     def _step_data_dir(self, remote: RemoteClient) -> str | None:
         check = remote.run(
@@ -268,9 +254,8 @@ class TsPiotInstaller:
         return "Создан"
 
     def _step_kkt_driver(self, remote: RemoteClient) -> str | None:
-        url, version, filename = webdist.kkt_driver_url(self.base_url, self.architecture)
-        self.logger.info("KKT driver version %s: %s", version, url)
-        expected = webdist.fetch_sha256(url)
+        artifact = self.source.kkt_driver(self.architecture)
+        self.logger.info("KKT driver version %s: %s", artifact.version, artifact.locator)
 
         listing = remote.run(
             f"ls {shlex.quote(self.target_base)}/libsp-kkt-driver-*.so 2>/dev/null | head -n1",
@@ -287,32 +272,31 @@ class TsPiotInstaller:
         else:
             mode = "0644"
             owner = self.owner
-            target_so = posixpath.join(self.target_base, filename)
+            target_so = posixpath.join(self.target_base, artifact.filename)
             self.logger.warning(
                 "Existing libsp-kkt-driver-*.so not found, installing %s with owner %s (0644).",
                 target_so,
                 owner,
             )
 
-        changed = self._download_and_install(remote, url=url, dest=target_so, expected=expected)
+        changed = self._install(remote, artifact, target_so)
         if not changed:
-            return f"Уже актуально (v{version})"
+            return f"Уже актуально (v{artifact.version})"
 
         if mode:
             remote.run(f"chmod {shlex.quote(mode)} {shlex.quote(target_so)}", use_sudo=True)
         if owner:
             remote.run(f"chown {shlex.quote(owner)} {shlex.quote(target_so)}", use_sudo=True)
         self._wait_for_remote_path(remote, target_so, path_type="f", description=f"KKT driver {target_so}")
-        return f"Обновлено (v{version})"
+        return f"Обновлено (v{artifact.version})"
 
     def _step_gismt_cert(self, remote: RemoteClient) -> str | None:
-        url = webdist.gismt_cert_url(self.base_url, self.tspiot.gismt_cert_name)
+        artifact = self.source.gismt_cert(self.tspiot.gismt_cert_name)
         dest = posixpath.join(self.target_data_dir, self.tspiot.gismt_cert_name)
-        self.logger.info("gismt cert: %s", url)
-        expected = webdist.fetch_sha256(url)
+        self.logger.info("gismt cert: %s", artifact.locator)
 
         remote.run(f"mkdir -p {shlex.quote(self.target_data_dir)}", use_sudo=True)
-        changed = self._download_and_install(remote, url=url, dest=dest, expected=expected)
+        changed = self._install(remote, artifact, dest)
         if not changed:
             return "Уже актуально"
 
@@ -335,45 +319,36 @@ class TsPiotInstaller:
         match = re.search(r"[0-9a-fA-F]{64}", result.stdout)
         return match.group(0).lower() if match else None
 
-    def _download_and_install(
-        self,
-        remote: RemoteClient,
-        *,
-        url: str,
-        dest: str,
-        expected: str | None,
-    ) -> bool:
-        """Скачать и установить файл ТОЛЬКО если он изменился. True, если заменён.
+    def _install(self, remote: RemoteClient, artifact, dest: str) -> bool:
+        """Установить артефакт в dest ТОЛЬКО если он изменился. True, если заменён.
 
-        Хэш проверяется ДО загрузки: сравнивается контрольная сумма с сервера
-        (<url>.sha256) с sha256 уже установленного файла. Если совпали — загрузки нет.
+        Хэш проверяется ДО загрузки: ожидаемая контрольная сумма источника
+        сравнивается с sha256 уже установленного файла. Если совпали — доставки нет.
         """
+        expected = self.source.expected_sha256(artifact)
         installed = self._remote_sha256(remote, dest)
         if expected and installed == expected:
             self.logger.info("Файл не изменился (sha256 совпал), загрузка не требуется: %s", dest)
             return False
         if expected is None:
             self.logger.warning(
-                "Нет .sha256 на сервере для %s: файл будет загружен без предварительной сверки.", url
+                "Нет контрольной суммы источника для %s: файл будет доставлен без предварительной сверки.",
+                artifact.locator,
             )
         elif installed is None:
             self.logger.warning(
                 "Не удалось вычислить sha256 установленного файла %s "
-                "(нет sha256sum/openssl или файл отсутствует) — файл будет загружен.",
+                "(нет sha256sum/openssl или файл отсутствует) — файл будет доставлен.",
                 dest,
             )
 
         tmp = dest + ".dbrepair.new"
         try:
-            remote.run(
-                _download_command(url, tmp),
-                use_sudo=True,
-                timeout=DOWNLOAD_TIMEOUT_SECONDS,
-            )
+            self.source.deliver(remote, artifact, tmp)
             actual = self._remote_sha256(remote, tmp)
             if expected and actual and actual != expected:
                 raise TsPiotError(
-                    f"Контрольная сумма не совпала после загрузки {url} "
+                    f"Контрольная сумма не совпала после доставки {artifact.locator} "
                     f"(ожидалось {expected}, получено {actual})."
                 )
             # Атомарная замена: mv корректно работает даже с запущенным бинарником/занятой .so.

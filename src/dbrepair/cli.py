@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from .config import ConfigError, load_config, override_host
+from .distsource import DistError, build_source
 from .logging_utils import configure_logger
 from .tspiot import TsPiotInstaller
 from .workflow import DbRepairWorkflow, WorkflowError
@@ -50,8 +51,10 @@ def _run_tspiot(args) -> int:
     if config.tspiot is None:
         print("Config error: отсутствует секция [tspiot].", file=sys.stderr)
         return 2
-    if config.webserver is None:
-        print("Config error: отсутствует секция [webserver] (base_url).", file=sys.stderr)
+    try:
+        source = build_source(config)
+    except DistError as exc:
+        print(f"Config error: {exc}", file=sys.stderr)
         return 2
 
     logger, log_path = configure_logger(
@@ -75,7 +78,7 @@ def _run_tspiot(args) -> int:
             installer = TsPiotInstaller(
                 host_config,
                 logger,
-                base_url=config.webserver.normalized(),
+                source=source,
                 architecture="x64",
                 target_base=config.tspiot.target_base,
                 auto_detect=True,

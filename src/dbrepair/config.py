@@ -87,13 +87,25 @@ class WorkflowPaths:
 
 @dataclass(frozen=True)
 class WebServerConfig:
-    """Адрес веб-сервера дистрибутивов (HTTP, без авторизации)."""
+    """Адрес веб-сервера дистрибутивов (HTTP, без авторизации). Устаревшее — см. DistributionConfig."""
 
     base_url: str = "http://192.168.20.229/UKM/"
 
     def normalized(self) -> str:
         url = self.base_url.strip()
         return url if url.endswith("/") else url + "/"
+
+
+@dataclass(frozen=True)
+class DistributionConfig:
+    """Источник дистрибутивов ТС ПИоТ: HTTP-сервер или локальный каталог.
+
+    Если задан local_dir — используется локальный каталог (файлы заливаются на
+    кассу по SFTP). Иначе — base_url (касса качает файлы по HTTP напрямую).
+    """
+
+    base_url: str | None = None
+    local_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +134,7 @@ class AppConfig:
     source_path: Path
     tspiot: TsPiotConfig | None = None
     webserver: WebServerConfig | None = None
+    distribution: DistributionConfig | None = None
 
 
 def load_config(config_path: str | Path) -> AppConfig:
@@ -187,6 +200,9 @@ def load_config(config_path: str | Path) -> AppConfig:
     webserver_raw = raw.get("webserver")
     webserver = _load_webserver(webserver_raw) if isinstance(webserver_raw, dict) else None
 
+    distribution_raw = raw.get("distribution")
+    distribution = _load_distribution(base_dir, distribution_raw) if isinstance(distribution_raw, dict) else None
+
     return AppConfig(
         connection=connection,
         database=database,
@@ -195,6 +211,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         source_path=path,
         tspiot=tspiot,
         webserver=webserver,
+        distribution=distribution,
     )
 
 
@@ -212,6 +229,13 @@ def _load_webserver(raw: dict) -> WebServerConfig:
     return WebServerConfig(
         base_url=str(raw.get("base_url", "http://192.168.20.229/UKM/")),
     )
+
+
+def _load_distribution(base_dir: Path, raw: dict) -> DistributionConfig:
+    base_url = _optional_str(raw, "base_url")
+    local_dir_raw = raw.get("local_dir")
+    local_dir = _resolve_path(base_dir, local_dir_raw) if isinstance(local_dir_raw, str) and local_dir_raw.strip() else None
+    return DistributionConfig(base_url=base_url, local_dir=local_dir)
 
 
 def override_host(config: AppConfig, host: str | None) -> AppConfig:

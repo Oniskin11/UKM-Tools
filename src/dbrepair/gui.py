@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 
 from .config import ConfigError, load_config, override_host
+from .distsource import build_source
 from .logging_utils import configure_logger
 from .remote import OperationCancelledError
 from .tspiot import TSPIOT_STEPS, TsPiotInstaller, detect_environment, reboot_host
@@ -697,9 +698,8 @@ class TsPiotTargetView(BaseTargetView):
         config = load_config(config_path)
         if config.tspiot is None:
             raise ConfigError("В config.toml отсутствует секция [tspiot].")
-        if config.webserver is None:
-            raise ConfigError("В config.toml отсутствует секция [webserver] (base_url).")
         config = override_host(config, host)
+        source = build_source(config)
         self.logger.info("Using config %s", config.source_path)
         self.logger.info("Target host %s", config.connection.host)
 
@@ -709,7 +709,7 @@ class TsPiotTargetView(BaseTargetView):
         installer = TsPiotInstaller(
             config,
             self.logger,
-            base_url=config.webserver.normalized(),
+            source=source,
             architecture=self.architecture(),
             target_base=self.target_base(),
             cancel_event=cancel_event,
