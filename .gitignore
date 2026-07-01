@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime output
+backups/
+logs/
+
+# Build artifacts
+build/
+dist/
+
+# Local (secret) config — commit only config.example.toml
+config.toml
+
+# Distribution artifacts (раздаются с веб-сервера, не хранятся в репозитории)
+*.7z
+*.zip
+gismt_cert.txt
+/TS PIoT/
+
+# Устаревший дубль-снапшот исходников (канонический код — в src/)
+dbrepair-gui-source/
