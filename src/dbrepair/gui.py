@@ -5,9 +5,10 @@ import queue
 import re
 import threading
 import tkinter as tk
+from dataclasses import replace
 from tkinter import filedialog, ttk
 
-from .config import ConfigError, load_config, override_host
+from .config import ConfigError, load_config, override_host, save_publish_password
 from .distsource import build_source
 from .logging_utils import configure_logger
 from .publisher import PublishError, detect_version, publish_kkt
@@ -974,21 +975,90 @@ class PublishPanel:
         if not source:
             self.summary_var.set("Укажите файл или папку драйвера.")
             return
+
+        config_path = self.config_path_var.get().strip()
+        try:
+            config = load_config(config_path)
+        except ConfigError as exc:
+            self.summary_var.set(f"Ошибка конфига: {_shorten(str(exc))}")
+            return
+        if config.publish is None:
+            self.summary_var.set("В config.toml нет секции [publish].")
+            return
+
+        answer = self._ask_password(config.publish.host, config.publish.username, config.publish.password)
+        if answer is None:
+            self.summary_var.set("Публикация отменена.")
+            return
+        password, save = answer
+        if not password:
+            self.summary_var.set("Пароль не введён.")
+            return
+
         self.busy = True
         self.publish_button.configure(state="disabled")
         self.summary_var.set("Публикация...")
         threading.Thread(
             target=self._worker,
-            args=(self.config_path_var.get().strip(), source, self.version_var.get().strip()),
+            args=(config_path, source, self.version_var.get().strip(), password, save),
             daemon=True,
         ).start()
 
-    def _worker(self, config_path: str, source: str, version: str) -> None:
+    def _ask_password(self, host: str, username: str, current: str | None):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Пароль для публикации")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(frame, text=f"Веб-сервер: {username}@{host}").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(frame, text="Пароль SSH:").grid(row=1, column=0, sticky="w", pady=(10, 0), padx=(0, 8))
+        pwd_var = tk.StringVar(value=current or "")
+        save_var = tk.BooleanVar(value=bool(current))
+        entry = ttk.Entry(frame, textvariable=pwd_var, show="*", width=28)
+        entry.grid(row=1, column=1, sticky="ew", pady=(10, 0))
+        ttk.Checkbutton(frame, text="Сохранить пароль в config.toml", variable=save_var).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(14, 0))
+
+        result: dict[str, object] = {}
+
+        def ok() -> None:
+            result["password"] = pwd_var.get()
+            result["save"] = save_var.get()
+            dialog.destroy()
+
+        def cancel() -> None:
+            dialog.destroy()
+
+        ttk.Button(buttons, text="OK", command=ok).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(buttons, text="Отмена", command=cancel).grid(row=0, column=1)
+        entry.focus_set()
+        dialog.bind("<Return>", lambda _event: ok())
+        dialog.bind("<Escape>", lambda _event: cancel())
+        self.root.wait_window(dialog)
+
+        if "password" not in result:
+            return None
+        return str(result["password"]), bool(result["save"])
+
+    def _worker(self, config_path: str, source: str, version: str, password: str, save: bool) -> None:
         try:
             config = load_config(config_path)
             if config.publish is None:
                 raise PublishError("В config.toml отсутствует секция [publish] (доступ к веб-серверу).")
-            result = publish_kkt(config.publish, Path(source), self.logger, version=version or None)
+            publish_config = replace(config.publish, password=password)
+            result = publish_kkt(publish_config, Path(source), self.logger, version=version or None)
+            if save:
+                try:
+                    save_publish_password(config_path, password)
+                    self.logger.info("Пароль сохранён в %s", config_path)
+                except OSError as exc:
+                    self.logger.warning("Не удалось сохранить пароль в конфиг: %s", exc)
             self.event_queue.put(("publish-result", result, None))
         except (PublishError, ConfigError, RuntimeError, OSError, ValueError) as exc:
             self.logger.exception("Publish failed.")

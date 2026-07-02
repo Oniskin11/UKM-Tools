@@ -50,9 +50,11 @@ base_url = "http://192.168.20.229/UKM/"
 
 [publish]
 # Доступ к веб-серверу для публикации драйверов (вкладка «Публикация драйвера»).
+# Пароль можно не хранить здесь: он запрашивается перед публикацией,
+# с галочкой «Сохранить в config.toml».
 host = "192.168.20.229"
 port = 22
 username = "root"
-password = "xxxxxx"
+# password = "xxxxxx"
 ukm_dir = "/var/www/files/UKM"
 owner = "www-data:www-data"

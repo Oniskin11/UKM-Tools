@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 import posixpath
+import re
 import tomllib
 
 
@@ -317,3 +318,43 @@ def _derive_dir_name(archive_name: str) -> str:
     if archive_name.endswith(".tgz"):
         return archive_name[: -len(".tgz")]
     return Path(archive_name).stem
+
+
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def save_publish_password(config_path: str | Path, password: str) -> None:
+    """Записать/обновить password в секции [publish] файла config.toml, сохраняя комментарии."""
+    path = Path(config_path).expanduser()
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    new_line = f'password = "{_toml_escape(password)}"'
+    section_re = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+    password_re = re.compile(r"^\s*#?\s*password\s*=")
+
+    out: list[str] = []
+    in_publish = False
+    inserted = False
+    for line in lines:
+        match = section_re.match(line)
+        if match:
+            if in_publish and not inserted:
+                out.append(new_line)
+                inserted = True
+            in_publish = match.group(1).strip() == "publish"
+            out.append(line)
+            continue
+        if in_publish and not inserted and password_re.match(line):
+            out.append(new_line)
+            inserted = True
+            continue
+        out.append(line)
+
+    if in_publish and not inserted:
+        out.append(new_line)
+        inserted = True
+    if not inserted:
+        out.extend(["", "[publish]", new_line])
+
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
