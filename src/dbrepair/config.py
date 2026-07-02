@@ -329,6 +329,8 @@ def _format_toml_value(value: object) -> str:
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):
+        return repr(value)
     return f'"{_toml_escape(str(value))}"'
 
 

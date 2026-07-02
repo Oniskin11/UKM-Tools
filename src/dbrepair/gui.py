@@ -7,6 +7,7 @@ import threading
 import tomllib
 import tkinter as tk
 from dataclasses import replace
+from pathlib import Path
 from tkinter import filedialog, ttk
 
 from .config import ConfigError, load_config, override_host, save_publish_password, update_config_sections
@@ -1098,12 +1099,64 @@ class PublishPanel:
 
 
 class SettingsDialog:
-    """Настройки источника дистрибутивов и параметров публикации."""
+    """Полные настройки config.toml по секциям (вкладки)."""
+
+    # (ключ, подпись, тип, значение по умолчанию)
+    SECTION_SPECS: tuple = (
+        ("connection", "Подключение", (
+            ("host", "Хост кассы", "str", ""),
+            ("port", "Порт", "int", 22),
+            ("username", "Пользователь", "str", "root"),
+            ("password", "Пароль", "password", ""),
+            ("sudo_password", "Пароль sudo", "password", ""),
+            ("use_sudo", "Использовать sudo", "bool", False),
+            ("timeout", "Таймаут, сек", "float", 20.0),
+            ("key_filename", "Ключ (файл)", "path_file", ""),
+        )),
+        ("database", "База данных", (
+            ("name", "Имя БД", "str", "ukmclient"),
+            ("password", "Пароль БД", "password", ""),
+        )),
+        ("paths", "Пути (восстановление БД)", (
+            ("dbrepair_archive", "Архив dbrepair (.tgz)", "path_file", ""),
+            ("empty_datadir_archive", "Архив пустого datadir (.tgz)", "path_file", ""),
+            ("local_backup_dir", "Локальный каталог бэкапов", "path_dir", "backups"),
+            ("remote_tmp_dir", "Временный каталог на кассе", "str", "/tmp"),
+            ("remote_dbrepair_dir_name", "Имя каталога dbrepair", "str", ""),
+            ("remote_mysql_dir", "Каталог MySQL", "str", "/usr/local/mysql"),
+            ("remote_mysql_var_dir", "Каталог данных MySQL", "str", "/usr/local/mysql/var"),
+            ("remote_mysql_backup_name", "Имя бэкапа datadir", "str", "mysql-db.tgz"),
+            ("remote_my_cnf", "Путь к my.cnf", "str", "/etc/my.cnf"),
+            ("remote_dump_filename", "Имя файла дампа", "str", "ukmclient.sql"),
+        )),
+        ("services", "Сервисы", (
+            ("mysql_stop", "Стоп MySQL", "str", "/etc/init.d/mysql stop"),
+            ("mysql_start", "Старт MySQL", "str", "/etc/init.d/mysql start"),
+            ("ukmclient_stop", "Стоп ukmclient", "str", "/etc/init.d/ukmclient stop"),
+            ("ukmclient_start", "Старт ukmclient", "str", "/etc/init.d/ukmclient start"),
+        )),
+        ("tspiot", "ТС ПИоТ", (
+            ("target_base", "Каталог установки", "str", "/usr/local/ukmclient"),
+            ("data_dir_name", "Имя каталога данных", "str", "data_tspiot"),
+            ("binary_name", "Имя бинарника", "str", "tspiot"),
+            ("gismt_cert_name", "Имя сертификата", "str", "gismt_cert.txt"),
+            ("owner", "Владелец (пусто = из каталога)", "str", ""),
+        )),
+        ("publish", "Публикация", (
+            ("host", "Хост веб-сервера", "str", ""),
+            ("port", "Порт", "int", 22),
+            ("username", "Пользователь", "str", "root"),
+            ("password", "Пароль", "password", ""),
+            ("ukm_dir", "Каталог UKM", "str", "/var/www/files/UKM"),
+            ("owner", "Владелец файлов", "str", "www-data:www-data"),
+        )),
+    )
 
     def __init__(self, root: tk.Tk, config_path: str, on_saved=None):
         self.root = root
         self.config_path = config_path
         self.on_saved = on_saved
+        self.vars: dict[tuple[str, str], tuple] = {}
 
         self.win = tk.Toplevel(root)
         self.win.title("Настройки")
@@ -1114,98 +1167,107 @@ class SettingsDialog:
         self.source_var = tk.StringVar(value="http")
         self.base_url_var = tk.StringVar(value="http://192.168.20.229/UKM/")
         self.local_dir_var = tk.StringVar()
-        self.pub_host_var = tk.StringVar(value="192.168.20.229")
-        self.pub_port_var = tk.StringVar(value="22")
-        self.pub_user_var = tk.StringVar(value="root")
-        self.pub_password_var = tk.StringVar()
-        self.pub_ukm_var = tk.StringVar(value="/var/www/files/UKM")
-        self.pub_owner_var = tk.StringVar(value="www-data:www-data")
         self.status_var = tk.StringVar()
 
+        self._raw = self._read_raw()
         self._build()
-        self._load()
         self._on_source_change()
         self.root.wait_window(self.win)
 
+    def _read_raw(self) -> dict:
+        try:
+            return tomllib.loads(Path(self.config_path).read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return {}
+
     def _build(self) -> None:
-        frame = ttk.Frame(self.win, padding=16)
+        frame = ttk.Frame(self.win, padding=12)
         frame.grid(row=0, column=0, sticky="nsew")
 
-        source_box = ttk.LabelFrame(frame, text="Источник дистрибутивов", padding=12)
-        source_box.grid(row=0, column=0, sticky="ew")
-        ttk.Radiobutton(
-            source_box, text="HTTP-сервер (касса качает сама)", value="http",
-            variable=self.source_var, command=self._on_source_change,
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(
-            source_box, text="Локальный каталог (заливка на кассу по SFTP)", value="local",
-            variable=self.source_var, command=self._on_source_change,
-        ).grid(row=1, column=0, sticky="w")
+        notebook = ttk.Notebook(frame)
+        notebook.grid(row=0, column=0, sticky="nsew")
 
-        self.http_box = ttk.LabelFrame(frame, text="HTTP-сервер", padding=12)
-        self.http_box.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        self.http_box.columnconfigure(1, weight=1)
-        ttk.Label(self.http_box, text="Базовый URL").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Entry(self.http_box, textvariable=self.base_url_var, width=44).grid(row=0, column=1, columnspan=2, sticky="ew")
+        for section, title, spec in self.SECTION_SPECS:
+            tab = ttk.Frame(notebook, padding=12)
+            tab.columnconfigure(1, weight=1)
+            notebook.add(tab, text=title)
+            section_raw = self._raw.get(section, {}) if isinstance(self._raw.get(section), dict) else {}
+            for row, (key, label, kind, default) in enumerate(spec):
+                value = section_raw.get(key, default)
+                self._add_field(tab, row, section, key, label, kind, value)
 
-        self.local_box = ttk.LabelFrame(frame, text="Локальный каталог", padding=12)
-        self.local_box.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        self.local_box.columnconfigure(1, weight=1)
-        ttk.Label(self.local_box, text="Каталог").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Entry(self.local_box, textvariable=self.local_dir_var, width=36).grid(row=0, column=1, sticky="ew")
-        ttk.Button(self.local_box, text="Обзор", command=self._browse_local).grid(row=0, column=2, padx=(8, 0))
-
-        self.publish_box = ttk.LabelFrame(frame, text="Публикация на веб-сервер (SSH)", padding=12)
-        self.publish_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        self.publish_box.columnconfigure(1, weight=1)
-        rows = (
-            ("Хост", self.pub_host_var),
-            ("Порт", self.pub_port_var),
-            ("Пользователь", self.pub_user_var),
-            ("Пароль", self.pub_password_var),
-            ("Каталог UKM", self.pub_ukm_var),
-            ("Владелец", self.pub_owner_var),
-        )
-        for index, (label, var) in enumerate(rows):
-            ttk.Label(self.publish_box, text=label).grid(row=index, column=0, sticky="w", padx=(0, 8), pady=2)
-            show = "*" if label == "Пароль" else ""
-            ttk.Entry(self.publish_box, textvariable=var, show=show, width=32).grid(row=index, column=1, sticky="ew", pady=2)
-        ttk.Label(self.publish_box, text="Пароль можно оставить пустым — спросим при публикации.").grid(
-            row=len(rows), column=0, columnspan=2, sticky="w", pady=(6, 0)
-        )
+        self._build_source_tab(notebook)
 
         bottom = ttk.Frame(frame)
-        bottom.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        bottom.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         bottom.columnconfigure(0, weight=1)
         ttk.Label(bottom, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
         ttk.Button(bottom, text="Сохранить", command=self._save).grid(row=0, column=1, padx=(8, 8))
         ttk.Button(bottom, text="Отмена", command=self.win.destroy).grid(row=0, column=2)
 
-    def _load(self) -> None:
-        raw: dict = {}
-        try:
-            raw = tomllib.loads(Path(self.config_path).read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
-            raw = {}
-        dist = raw.get("distribution", {}) if isinstance(raw.get("distribution"), dict) else {}
-        webserver = raw.get("webserver", {}) if isinstance(raw.get("webserver"), dict) else {}
-        publish = raw.get("publish", {}) if isinstance(raw.get("publish"), dict) else {}
+    def _build_source_tab(self, notebook: ttk.Notebook) -> None:
+        tab = ttk.Frame(notebook, padding=12)
+        tab.columnconfigure(0, weight=1)
+        notebook.add(tab, text="Источник")
 
+        dist = self._raw.get("distribution", {}) if isinstance(self._raw.get("distribution"), dict) else {}
+        webserver = self._raw.get("webserver", {}) if isinstance(self._raw.get("webserver"), dict) else {}
         local_dir = str(dist.get("local_dir", "") or "")
         base_url = str(dist.get("base_url") or webserver.get("base_url") or "http://192.168.20.229/UKM/")
         self.local_dir_var.set(local_dir)
         self.base_url_var.set(base_url)
         self.source_var.set("local" if local_dir.strip() else "http")
 
-        if publish.get("host"):
-            self.pub_host_var.set(str(publish.get("host")))
-        self.pub_port_var.set(str(publish.get("port", 22)))
-        if publish.get("username"):
-            self.pub_user_var.set(str(publish.get("username")))
-        if publish.get("password"):
-            self.pub_password_var.set(str(publish.get("password")))
-        self.pub_ukm_var.set(str(publish.get("ukm_dir", "/var/www/files/UKM")))
-        self.pub_owner_var.set(str(publish.get("owner", "www-data:www-data")))
+        ttk.Radiobutton(
+            tab, text="HTTP-сервер (касса качает сама)", value="http",
+            variable=self.source_var, command=self._on_source_change,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            tab, text="Локальный каталог (заливка по SFTP)", value="local",
+            variable=self.source_var, command=self._on_source_change,
+        ).grid(row=1, column=0, sticky="w")
+
+        self.http_box = ttk.LabelFrame(tab, text="HTTP-сервер", padding=10)
+        self.http_box.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.http_box.columnconfigure(1, weight=1)
+        ttk.Label(self.http_box, text="Базовый URL").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(self.http_box, textvariable=self.base_url_var, width=44).grid(row=0, column=1, sticky="ew")
+
+        self.local_box = ttk.LabelFrame(tab, text="Локальный каталог", padding=10)
+        self.local_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.local_box.columnconfigure(1, weight=1)
+        ttk.Label(self.local_box, text="Каталог").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(self.local_box, textvariable=self.local_dir_var, width=36).grid(row=0, column=1, sticky="ew")
+        ttk.Button(self.local_box, text="Обзор", command=self._browse_local).grid(row=0, column=2, padx=(8, 0))
+
+        ttk.Label(
+            tab, text="Публикация драйверов доступна только при HTTP-источнике (вкладка «Публикация»)."
+        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
+
+    def _add_field(self, parent, row, section, key, label, kind, value) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+        if kind == "bool":
+            var = tk.BooleanVar(value=bool(value))
+            ttk.Checkbutton(parent, variable=var).grid(row=row, column=1, sticky="w", pady=2)
+        else:
+            var = tk.StringVar(value="" if value is None else str(value))
+            show = "*" if kind == "password" else ""
+            ttk.Entry(parent, textvariable=var, show=show, width=42).grid(row=row, column=1, sticky="ew", pady=2)
+            if kind in ("path_file", "path_dir"):
+                ttk.Button(
+                    parent, text="Обзор", command=lambda v=var, k=kind: self._browse(v, k)
+                ).grid(row=row, column=2, padx=(6, 0))
+        self.vars[(section, key)] = (var, kind)
+
+    def _browse(self, var: tk.StringVar, kind: str) -> None:
+        path = filedialog.askdirectory() if kind == "path_dir" else filedialog.askopenfilename()
+        if path:
+            var.set(path)
+
+    def _browse_local(self) -> None:
+        path = filedialog.askdirectory(title="Каталог с дистрибутивами (UKM)")
+        if path:
+            self.local_dir_var.set(path)
 
     def _set_state(self, box: ttk.LabelFrame, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -1218,38 +1280,35 @@ class SettingsDialog:
     def _on_source_change(self) -> None:
         is_http = self.source_var.get() == "http"
         self._set_state(self.http_box, is_http)
-        self._set_state(self.publish_box, is_http)
         self._set_state(self.local_box, not is_http)
 
-    def _browse_local(self) -> None:
-        path = filedialog.askdirectory(title="Каталог с дистрибутивами (UKM)")
-        if path:
-            self.local_dir_var.set(path)
-
     def _save(self) -> None:
+        updates: dict[str, dict[str, object]] = {}
+        for section, _title, spec in self.SECTION_SPECS:
+            section_updates: dict[str, object] = {}
+            for key, _label, kind, default in spec:
+                var, _kind = self.vars[(section, key)]
+                if kind == "bool":
+                    section_updates[key] = bool(var.get())
+                elif kind == "int":
+                    section_updates[key] = _to_number(var.get(), int, default)
+                elif kind == "float":
+                    section_updates[key] = _to_number(var.get(), float, default)
+                else:
+                    text = var.get().strip()
+                    if text:
+                        section_updates[key] = text
+            if section_updates:
+                updates[section] = section_updates
+
         source = self.source_var.get()
-        updates: dict[str, dict[str, object]] = {
-            "distribution": {
-                "base_url": self.base_url_var.get().strip(),
-                "local_dir": self.local_dir_var.get().strip() if source == "local" else "",
-            }
+        distribution: dict[str, object] = {
+            "local_dir": self.local_dir_var.get().strip() if source == "local" else "",
         }
-        if source == "http":
-            try:
-                port = int(self.pub_port_var.get().strip() or "22")
-            except ValueError:
-                port = 22
-            publish: dict[str, object] = {
-                "host": self.pub_host_var.get().strip(),
-                "port": port,
-                "username": self.pub_user_var.get().strip(),
-                "ukm_dir": self.pub_ukm_var.get().strip(),
-                "owner": self.pub_owner_var.get().strip(),
-            }
-            password = self.pub_password_var.get()
-            if password:
-                publish["password"] = password
-            updates["publish"] = publish
+        base_url = self.base_url_var.get().strip()
+        if base_url:
+            distribution["base_url"] = base_url
+        updates["distribution"] = distribution
 
         try:
             update_config_sections(self.config_path, updates)
@@ -1374,6 +1433,13 @@ def _make_status_images() -> dict[str, tk.PhotoImage]:
         img.put(color, to=(0, 0, 12, 12))
         images[key] = img
     return images
+
+
+def _to_number(text: object, caster, default):
+    try:
+        return caster(str(text).strip())
+    except (ValueError, TypeError):
+        return default
 
 
 def _is_skip_detail(details: str | None) -> bool:
