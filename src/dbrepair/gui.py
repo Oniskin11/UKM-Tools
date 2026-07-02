@@ -10,6 +10,7 @@ from tkinter import filedialog, ttk
 from .config import ConfigError, load_config, override_host
 from .distsource import build_source
 from .logging_utils import configure_logger
+from .publisher import PublishError, detect_version, publish_kkt
 from .remote import OperationCancelledError
 from .tspiot import TSPIOT_STEPS, TsPiotInstaller, detect_environment, reboot_host
 from .workflow import DbRepairWorkflow, WORKFLOW_STEPS, WorkflowArtifacts
@@ -880,6 +881,147 @@ class TsPiotPanel(BasePanel):
 
 
 # --------------------------------------------------------------------------- #
+# Вкладка «Публикация драйвера»                                                #
+# --------------------------------------------------------------------------- #
+
+
+class PublishPanel:
+    """Публикация драйвера ККТ (zip или папка) на веб-сервер: заливка + sha256."""
+
+    def __init__(self, root: tk.Tk, parent: ttk.Frame, config_path_var: tk.StringVar):
+        self.root = root
+        self.config_path_var = config_path_var
+        self.event_queue: "queue.Queue[tuple]" = queue.Queue()
+        self.source_var = tk.StringVar()
+        self.version_var = tk.StringVar()
+        self.summary_var = tk.StringVar(value="Выберите zip-архив или папку с драйвером ККТ.")
+        self.busy = False
+
+        queue_handler = QueueLogHandler(self.event_queue, "publish")
+        self.logger, _ = configure_logger(
+            logger_name=f"dbrepair.publish.{id(self)}",
+            default_prefix="dbrepair-publish",
+            include_stream=False,
+            extra_handlers=[queue_handler],
+        )
+
+        self._build_ui(parent)
+        self.root.after(100, self._process_events)
+
+    def _build_ui(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        form = ttk.LabelFrame(parent, text="Драйвер ККТ", padding=12)
+        form.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 0))
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text="Файл (.zip) или папка драйвера").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(form, textvariable=self.source_var).grid(row=0, column=1, sticky="ew")
+        btns = ttk.Frame(form)
+        btns.grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(btns, text="Обзор файла", command=self._browse_file).grid(row=0, column=0, padx=(0, 4))
+        ttk.Button(btns, text="Обзор папки", command=self._browse_dir).grid(row=0, column=1)
+
+        ttk.Label(form, text="Версия").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(10, 0))
+        ttk.Entry(form, textvariable=self.version_var).grid(row=1, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(form, text="(определяется из имени, можно поправить)").grid(
+            row=1, column=2, sticky="w", padx=(8, 0), pady=(10, 0)
+        )
+
+        actions = ttk.Frame(form)
+        actions.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        actions.columnconfigure(1, weight=1)
+        self.publish_button = ttk.Button(actions, text="Опубликовать на веб-сервер", command=self.publish)
+        self.publish_button.grid(row=0, column=0, padx=(0, 8))
+        ttk.Label(actions, textvariable=self.summary_var).grid(row=0, column=1, sticky="w")
+
+        log_frame = ttk.Frame(parent, padding=(12, 12, 12, 12))
+        log_frame.grid(row=1, column=0, sticky="nsew")
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(1, weight=1)
+        ttk.Label(log_frame, text="Журнал публикации").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.log_text = tk.Text(log_frame, wrap="word", height=14, font=("Consolas", 10), state="disabled")
+        self.log_text.grid(row=1, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+
+    def _browse_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Выберите архив драйвера",
+            filetypes=(("ZIP archives", "*.zip"), ("All files", "*.*")),
+        )
+        if path:
+            self.source_var.set(path)
+            self._autofill_version(path)
+
+    def _browse_dir(self) -> None:
+        path = filedialog.askdirectory(title="Выберите папку драйвера")
+        if path:
+            self.source_var.set(path)
+            self._autofill_version(path)
+
+    def _autofill_version(self, path: str) -> None:
+        version = detect_version(Path(path).name)
+        if version:
+            self.version_var.set(version)
+
+    def publish(self) -> None:
+        if self.busy:
+            return
+        source = self.source_var.get().strip()
+        if not source:
+            self.summary_var.set("Укажите файл или папку драйвера.")
+            return
+        self.busy = True
+        self.publish_button.configure(state="disabled")
+        self.summary_var.set("Публикация...")
+        threading.Thread(
+            target=self._worker,
+            args=(self.config_path_var.get().strip(), source, self.version_var.get().strip()),
+            daemon=True,
+        ).start()
+
+    def _worker(self, config_path: str, source: str, version: str) -> None:
+        try:
+            config = load_config(config_path)
+            if config.publish is None:
+                raise PublishError("В config.toml отсутствует секция [publish] (доступ к веб-серверу).")
+            result = publish_kkt(config.publish, Path(source), self.logger, version=version or None)
+            self.event_queue.put(("publish-result", result, None))
+        except (PublishError, ConfigError, RuntimeError, OSError, ValueError) as exc:
+            self.logger.exception("Publish failed.")
+            self.event_queue.put(("publish-result", None, str(exc)))
+        finally:
+            self.event_queue.put(("publish-busy", False))
+
+    def _process_events(self) -> None:
+        while not self.event_queue.empty():
+            event = self.event_queue.get()
+            kind = event[0]
+            if kind == "log":
+                self._append_log(event[2])
+            elif kind == "publish-busy":
+                self.busy = event[1]
+                self.publish_button.configure(state="disabled" if self.busy else "normal")
+            elif kind == "publish-result":
+                result, error = event[1], event[2]
+                if error:
+                    self.summary_var.set(f"Ошибка: {_shorten(error)}")
+                else:
+                    archs = ", ".join(f"{a}={h[:12]}…" for a, h in sorted(result.hashes.items()))
+                    self.summary_var.set(f"Опубликовано KKT v{result.version} ({archs}).")
+        self.root.after(100, self._process_events)
+
+    def _append_log(self, message: str) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", f"{message}\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+
+# --------------------------------------------------------------------------- #
 # Главное окно                                                                 #
 # --------------------------------------------------------------------------- #
 
@@ -929,6 +1071,10 @@ class DbRepairGui:
         tspiot_tab = ttk.Frame(outer)
         outer.add(tspiot_tab, text="Установка ТС ПИоТ")
         self.tspiot_panel = TsPiotPanel(self.root, tspiot_tab, self.config_path_var)
+
+        publish_tab = ttk.Frame(outer)
+        outer.add(publish_tab, text="Публикация драйвера")
+        self.publish_panel = PublishPanel(self.root, publish_tab, self.config_path_var)
 
     def _browse_config(self) -> None:
         path = filedialog.askopenfilename(

@@ -47,3 +47,12 @@ base_url = "http://192.168.20.229/UKM/"
 #    (путь относительно этого config.toml или абсолютный). Если задан local_dir,
 #    он имеет приоритет над base_url:
 # local_dir = "dist/UKM"
+
+[publish]
+# Доступ к веб-серверу для публикации драйверов (вкладка «Публикация драйвера»).
+host = "192.168.20.229"
+port = 22
+username = "root"
+password = "xxxxxx"
+ukm_dir = "/var/www/files/UKM"
+owner = "www-data:www-data"

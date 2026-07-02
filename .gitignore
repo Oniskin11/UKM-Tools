@@ -17,8 +17,10 @@ config.toml
 # Distribution artifacts (раздаются с веб-сервера, не хранятся в репозитории)
 *.7z
 *.zip
+*.so
 gismt_cert.txt
 /TS PIoT/
+*_linux/
 
 # Устаревший дубль-снапшот исходников (канонический код — в src/)
 dbrepair-gui-source/

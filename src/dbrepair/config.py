@@ -126,6 +126,18 @@ class TsPiotConfig:
 
 
 @dataclass(frozen=True)
+class PublishConfig:
+    """Доступ к веб-серверу для публикации дистрибутивов (SSH/SFTP)."""
+
+    host: str
+    username: str
+    password: str | None = None
+    port: int = 22
+    ukm_dir: str = "/var/www/files/UKM"
+    owner: str = "www-data:www-data"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     connection: ConnectionConfig
     database: DatabaseConfig
@@ -135,6 +147,7 @@ class AppConfig:
     tspiot: TsPiotConfig | None = None
     webserver: WebServerConfig | None = None
     distribution: DistributionConfig | None = None
+    publish: PublishConfig | None = None
 
 
 def load_config(config_path: str | Path) -> AppConfig:
@@ -203,6 +216,9 @@ def load_config(config_path: str | Path) -> AppConfig:
     distribution_raw = raw.get("distribution")
     distribution = _load_distribution(base_dir, distribution_raw) if isinstance(distribution_raw, dict) else None
 
+    publish_raw = raw.get("publish")
+    publish = _load_publish(publish_raw) if isinstance(publish_raw, dict) else None
+
     return AppConfig(
         connection=connection,
         database=database,
@@ -212,6 +228,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         tspiot=tspiot,
         webserver=webserver,
         distribution=distribution,
+        publish=publish,
     )
 
 
@@ -236,6 +253,17 @@ def _load_distribution(base_dir: Path, raw: dict) -> DistributionConfig:
     local_dir_raw = raw.get("local_dir")
     local_dir = _resolve_path(base_dir, local_dir_raw) if isinstance(local_dir_raw, str) and local_dir_raw.strip() else None
     return DistributionConfig(base_url=base_url, local_dir=local_dir)
+
+
+def _load_publish(raw: dict) -> PublishConfig:
+    return PublishConfig(
+        host=_require_str(raw, "host"),
+        username=_require_str(raw, "username"),
+        password=_optional_str(raw, "password"),
+        port=int(raw.get("port", 22)),
+        ukm_dir=str(raw.get("ukm_dir", "/var/www/files/UKM")),
+        owner=str(raw.get("owner", "www-data:www-data")),
+    )
 
 
 def override_host(config: AppConfig, host: str | None) -> AppConfig:
