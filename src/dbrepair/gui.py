@@ -4,11 +4,12 @@ import logging
 import queue
 import re
 import threading
+import tomllib
 import tkinter as tk
 from dataclasses import replace
 from tkinter import filedialog, ttk
 
-from .config import ConfigError, load_config, override_host, save_publish_password
+from .config import ConfigError, load_config, override_host, save_publish_password, update_config_sections
 from .distsource import build_source
 from .logging_utils import configure_logger
 from .publisher import PublishError, detect_version, publish_kkt
@@ -1092,6 +1093,176 @@ class PublishPanel:
 
 
 # --------------------------------------------------------------------------- #
+# Диалог настроек                                                              #
+# --------------------------------------------------------------------------- #
+
+
+class SettingsDialog:
+    """Настройки источника дистрибутивов и параметров публикации."""
+
+    def __init__(self, root: tk.Tk, config_path: str, on_saved=None):
+        self.root = root
+        self.config_path = config_path
+        self.on_saved = on_saved
+
+        self.win = tk.Toplevel(root)
+        self.win.title("Настройки")
+        self.win.transient(root)
+        self.win.resizable(False, False)
+        self.win.grab_set()
+
+        self.source_var = tk.StringVar(value="http")
+        self.base_url_var = tk.StringVar(value="http://192.168.20.229/UKM/")
+        self.local_dir_var = tk.StringVar()
+        self.pub_host_var = tk.StringVar(value="192.168.20.229")
+        self.pub_port_var = tk.StringVar(value="22")
+        self.pub_user_var = tk.StringVar(value="root")
+        self.pub_password_var = tk.StringVar()
+        self.pub_ukm_var = tk.StringVar(value="/var/www/files/UKM")
+        self.pub_owner_var = tk.StringVar(value="www-data:www-data")
+        self.status_var = tk.StringVar()
+
+        self._build()
+        self._load()
+        self._on_source_change()
+        self.root.wait_window(self.win)
+
+    def _build(self) -> None:
+        frame = ttk.Frame(self.win, padding=16)
+        frame.grid(row=0, column=0, sticky="nsew")
+
+        source_box = ttk.LabelFrame(frame, text="Источник дистрибутивов", padding=12)
+        source_box.grid(row=0, column=0, sticky="ew")
+        ttk.Radiobutton(
+            source_box, text="HTTP-сервер (касса качает сама)", value="http",
+            variable=self.source_var, command=self._on_source_change,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            source_box, text="Локальный каталог (заливка на кассу по SFTP)", value="local",
+            variable=self.source_var, command=self._on_source_change,
+        ).grid(row=1, column=0, sticky="w")
+
+        self.http_box = ttk.LabelFrame(frame, text="HTTP-сервер", padding=12)
+        self.http_box.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.http_box.columnconfigure(1, weight=1)
+        ttk.Label(self.http_box, text="Базовый URL").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(self.http_box, textvariable=self.base_url_var, width=44).grid(row=0, column=1, columnspan=2, sticky="ew")
+
+        self.local_box = ttk.LabelFrame(frame, text="Локальный каталог", padding=12)
+        self.local_box.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.local_box.columnconfigure(1, weight=1)
+        ttk.Label(self.local_box, text="Каталог").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(self.local_box, textvariable=self.local_dir_var, width=36).grid(row=0, column=1, sticky="ew")
+        ttk.Button(self.local_box, text="Обзор", command=self._browse_local).grid(row=0, column=2, padx=(8, 0))
+
+        self.publish_box = ttk.LabelFrame(frame, text="Публикация на веб-сервер (SSH)", padding=12)
+        self.publish_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.publish_box.columnconfigure(1, weight=1)
+        rows = (
+            ("Хост", self.pub_host_var),
+            ("Порт", self.pub_port_var),
+            ("Пользователь", self.pub_user_var),
+            ("Пароль", self.pub_password_var),
+            ("Каталог UKM", self.pub_ukm_var),
+            ("Владелец", self.pub_owner_var),
+        )
+        for index, (label, var) in enumerate(rows):
+            ttk.Label(self.publish_box, text=label).grid(row=index, column=0, sticky="w", padx=(0, 8), pady=2)
+            show = "*" if label == "Пароль" else ""
+            ttk.Entry(self.publish_box, textvariable=var, show=show, width=32).grid(row=index, column=1, sticky="ew", pady=2)
+        ttk.Label(self.publish_box, text="Пароль можно оставить пустым — спросим при публикации.").grid(
+            row=len(rows), column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+
+        bottom = ttk.Frame(frame)
+        bottom.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        bottom.columnconfigure(0, weight=1)
+        ttk.Label(bottom, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
+        ttk.Button(bottom, text="Сохранить", command=self._save).grid(row=0, column=1, padx=(8, 8))
+        ttk.Button(bottom, text="Отмена", command=self.win.destroy).grid(row=0, column=2)
+
+    def _load(self) -> None:
+        raw: dict = {}
+        try:
+            raw = tomllib.loads(Path(self.config_path).read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            raw = {}
+        dist = raw.get("distribution", {}) if isinstance(raw.get("distribution"), dict) else {}
+        webserver = raw.get("webserver", {}) if isinstance(raw.get("webserver"), dict) else {}
+        publish = raw.get("publish", {}) if isinstance(raw.get("publish"), dict) else {}
+
+        local_dir = str(dist.get("local_dir", "") or "")
+        base_url = str(dist.get("base_url") or webserver.get("base_url") or "http://192.168.20.229/UKM/")
+        self.local_dir_var.set(local_dir)
+        self.base_url_var.set(base_url)
+        self.source_var.set("local" if local_dir.strip() else "http")
+
+        if publish.get("host"):
+            self.pub_host_var.set(str(publish.get("host")))
+        self.pub_port_var.set(str(publish.get("port", 22)))
+        if publish.get("username"):
+            self.pub_user_var.set(str(publish.get("username")))
+        if publish.get("password"):
+            self.pub_password_var.set(str(publish.get("password")))
+        self.pub_ukm_var.set(str(publish.get("ukm_dir", "/var/www/files/UKM")))
+        self.pub_owner_var.set(str(publish.get("owner", "www-data:www-data")))
+
+    def _set_state(self, box: ttk.LabelFrame, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for child in box.winfo_children():
+            try:
+                child.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _on_source_change(self) -> None:
+        is_http = self.source_var.get() == "http"
+        self._set_state(self.http_box, is_http)
+        self._set_state(self.publish_box, is_http)
+        self._set_state(self.local_box, not is_http)
+
+    def _browse_local(self) -> None:
+        path = filedialog.askdirectory(title="Каталог с дистрибутивами (UKM)")
+        if path:
+            self.local_dir_var.set(path)
+
+    def _save(self) -> None:
+        source = self.source_var.get()
+        updates: dict[str, dict[str, object]] = {
+            "distribution": {
+                "base_url": self.base_url_var.get().strip(),
+                "local_dir": self.local_dir_var.get().strip() if source == "local" else "",
+            }
+        }
+        if source == "http":
+            try:
+                port = int(self.pub_port_var.get().strip() or "22")
+            except ValueError:
+                port = 22
+            publish: dict[str, object] = {
+                "host": self.pub_host_var.get().strip(),
+                "port": port,
+                "username": self.pub_user_var.get().strip(),
+                "ukm_dir": self.pub_ukm_var.get().strip(),
+                "owner": self.pub_owner_var.get().strip(),
+            }
+            password = self.pub_password_var.get()
+            if password:
+                publish["password"] = password
+            updates["publish"] = publish
+
+        try:
+            update_config_sections(self.config_path, updates)
+        except OSError as exc:
+            self.status_var.set(f"Не удалось сохранить: {exc}")
+            return
+
+        if self.on_saved is not None:
+            self.on_saved()
+        self.win.destroy()
+
+
+# --------------------------------------------------------------------------- #
 # Главное окно                                                                 #
 # --------------------------------------------------------------------------- #
 
@@ -1106,6 +1277,7 @@ class DbRepairGui:
 
         self._build_styles()
         self._build_ui()
+        self._apply_source_visibility()
 
     def _build_styles(self) -> None:
         style = ttk.Style()
@@ -1130,21 +1302,45 @@ class DbRepairGui:
         ttk.Label(config_frame, text="Файл конфигурации").grid(row=0, column=0, sticky="w", padx=(0, 8))
         ttk.Entry(config_frame, textvariable=self.config_path_var).grid(row=0, column=1, sticky="ew")
         ttk.Button(config_frame, text="Обзор", command=self._browse_config).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(config_frame, text="Настройки…", command=self._open_settings).grid(row=0, column=3, padx=(8, 0))
 
-        outer = ttk.Notebook(root_frame)
-        outer.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        self.outer = ttk.Notebook(root_frame)
+        self.outer.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
 
-        db_tab = ttk.Frame(outer)
-        outer.add(db_tab, text="Восстановление БД")
+        db_tab = ttk.Frame(self.outer)
+        self.outer.add(db_tab, text="Восстановление БД")
         self.db_panel = DbRepairPanel(self.root, db_tab, self.config_path_var)
 
-        tspiot_tab = ttk.Frame(outer)
-        outer.add(tspiot_tab, text="Установка ТС ПИоТ")
+        tspiot_tab = ttk.Frame(self.outer)
+        self.outer.add(tspiot_tab, text="Установка ТС ПИоТ")
         self.tspiot_panel = TsPiotPanel(self.root, tspiot_tab, self.config_path_var)
 
-        publish_tab = ttk.Frame(outer)
-        outer.add(publish_tab, text="Публикация драйвера")
-        self.publish_panel = PublishPanel(self.root, publish_tab, self.config_path_var)
+        self.publish_tab = ttk.Frame(self.outer)
+        self.outer.add(self.publish_tab, text="Публикация драйвера")
+        self.publish_panel = PublishPanel(self.root, self.publish_tab, self.config_path_var)
+
+    def _current_source_is_http(self) -> bool:
+        try:
+            config = load_config(self.config_path_var.get().strip())
+        except ConfigError:
+            return True
+        dist = config.distribution
+        if dist is not None and dist.local_dir is not None:
+            return False
+        if dist is not None and dist.base_url:
+            return True
+        return config.webserver is not None or dist is None
+
+    def _apply_source_visibility(self) -> None:
+        """Вкладка «Публикация драйвера» видна только при HTTP-источнике."""
+        is_http = self._current_source_is_http()
+        try:
+            if is_http:
+                self.outer.add(self.publish_tab, text="Публикация драйвера")
+            else:
+                self.outer.hide(self.publish_tab)
+        except tk.TclError:
+            pass
 
     def _browse_config(self) -> None:
         path = filedialog.askopenfilename(
@@ -1153,6 +1349,10 @@ class DbRepairGui:
         )
         if path:
             self.config_path_var.set(path)
+            self._apply_source_visibility()
+
+    def _open_settings(self) -> None:
+        SettingsDialog(self.root, self.config_path_var.get().strip(), on_saved=self._apply_source_visibility)
 
 
 # --------------------------------------------------------------------------- #

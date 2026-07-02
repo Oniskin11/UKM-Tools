@@ -45,3 +45,27 @@ def test_escapes_special_chars(tmp_path):
     secret = 'a"b\\c'
     save_publish_password(cfg, secret)
     assert _read(cfg)["publish"]["password"] == secret
+
+
+def test_update_multiple_sections_and_types(tmp_path):
+    from dbrepair.config import update_config_sections
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[distribution]\n"
+        'base_url = "http://old/"\n'
+        "# local_dir = \"x\"\n",
+        encoding="utf-8",
+    )
+    update_config_sections(
+        cfg,
+        {
+            "distribution": {"base_url": "http://new/UKM/", "local_dir": ""},
+            "publish": {"host": "h", "port": 2222},
+        },
+    )
+    data = _read(cfg)
+    assert data["distribution"]["base_url"] == "http://new/UKM/"
+    assert data["distribution"]["local_dir"] == ""
+    assert data["publish"]["host"] == "h"
+    assert data["publish"]["port"] == 2222  # int без кавычек

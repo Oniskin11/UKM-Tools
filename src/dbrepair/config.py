@@ -324,37 +324,62 @@ def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def save_publish_password(config_path: str | Path, password: str) -> None:
-    """Записать/обновить password в секции [publish] файла config.toml, сохраняя комментарии."""
+def _format_toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return f'"{_toml_escape(str(value))}"'
+
+
+def update_config_sections(config_path: str | Path, updates: dict[str, dict[str, object]]) -> None:
+    """Обновить/вставить ключи в секциях config.toml, сохраняя комментарии и остальное.
+
+    updates: {"секция": {"ключ": значение, ...}}. Отсутствующие секции/ключи создаются.
+    """
     path = Path(config_path).expanduser()
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
     lines = text.splitlines()
-    new_line = f'password = "{_toml_escape(password)}"'
     section_re = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-    password_re = re.compile(r"^\s*#?\s*password\s*=")
+    key_re = re.compile(r"^\s*#?\s*([A-Za-z0-9_]+)\s*=")
+
+    remaining = {section: dict(values) for section, values in updates.items()}
+
+    def flush(section: str | None, out: list[str]) -> None:
+        values = remaining.get(section) if section else None
+        if values:
+            for key, value in list(values.items()):
+                out.append(f"{key} = {_format_toml_value(value)}")
+            remaining[section] = {}
 
     out: list[str] = []
-    in_publish = False
-    inserted = False
+    current: str | None = None
     for line in lines:
-        match = section_re.match(line)
-        if match:
-            if in_publish and not inserted:
-                out.append(new_line)
-                inserted = True
-            in_publish = match.group(1).strip() == "publish"
+        section_match = section_re.match(line)
+        if section_match:
+            flush(current, out)
+            current = section_match.group(1).strip()
             out.append(line)
             continue
-        if in_publish and not inserted and password_re.match(line):
-            out.append(new_line)
-            inserted = True
-            continue
+        if current in remaining and remaining[current]:
+            key_match = key_re.match(line)
+            if key_match and key_match.group(1) in remaining[current]:
+                key = key_match.group(1)
+                out.append(f"{key} = {_format_toml_value(remaining[current].pop(key))}")
+                continue
         out.append(line)
+    flush(current, out)
 
-    if in_publish and not inserted:
-        out.append(new_line)
-        inserted = True
-    if not inserted:
-        out.extend(["", "[publish]", new_line])
+    for section, values in remaining.items():
+        if values:
+            out.append("")
+            out.append(f"[{section}]")
+            for key, value in values.items():
+                out.append(f"{key} = {_format_toml_value(value)}")
 
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def save_publish_password(config_path: str | Path, password: str) -> None:
+    """Записать/обновить password в секции [publish] (сохраняя комментарии)."""
+    update_config_sections(config_path, {"publish": {"password": password}})
