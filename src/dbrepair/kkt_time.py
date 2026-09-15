@@ -62,9 +62,9 @@ if {start_ppp}; then
 else
     ppp_start_status=$?
     # Код 2 штатно возвращается, когда PPP уже поднят без pid-файла.
-    # Принимаем его только после проверки именно ККТ, а не локального адреса кассы.
-    if [ "$ppp_start_status" -eq 2 ] && ping -c 1 -W 2 {PPP_KKT_IP} >/dev/null 2>&1; then
-        echo "PPP is already active; continuing with KKT time synchronization." >&2
+    # ICMP у ККТ может быть закрыт; фактической проверкой будет SSH ниже.
+    if [ "$ppp_start_status" -eq 2 ]; then
+        echo "PPP reports an existing channel; validating it with KKT SSH." >&2
         ppp_started=1
     else
         echo "PPP start failed with exit status $ppp_start_status; diagnostics:" >&2
