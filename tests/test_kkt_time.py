@@ -24,7 +24,8 @@ class KktTimeCommandTests(unittest.TestCase):
         self.assertIn("trap cleanup EXIT HUP INT TERM", command)
         self.assertIn("/etc/init.d/ukmclient start || true", command)
         self.assertIn("PPP start failed with exit status", command)
-        self.assertIn("tail -n 100 /var/log/ppp-pos_ttyS0.log", command)
+        self.assertIn("journalctl --no-pager -t ukm -n 100", command)
+        self.assertIn("/var/log/messages /var/log/syslog /var/log/daemon.log", command)
 
     def test_sets_date_from_cash_clock(self) -> None:
         command = build_sync_command()
