@@ -24,8 +24,8 @@ class KktTimeCommandTests(unittest.TestCase):
         self.assertIn("trap cleanup EXIT HUP INT TERM", command)
         self.assertIn("/etc/init.d/ukmclient start || true", command)
         self.assertIn("PPP start failed with exit status", command)
-        self.assertIn('ping -c 1 -W 2 192.168.250.2', command)
-        self.assertIn("PPP is already active; continuing", command)
+        self.assertIn("PPP reports an existing channel; validating it with KKT SSH.", command)
+        self.assertNotIn("ping -c 1 -W 2", command)
         self.assertIn("journalctl --no-pager -t ukm -n 100", command)
         self.assertIn("/var/log/messages /var/log/syslog /var/log/daemon.log", command)
 
