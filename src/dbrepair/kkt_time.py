@@ -61,8 +61,23 @@ if {start_ppp}; then
     ppp_started=1
 else
     ppp_start_status=$?
-    echo "PPP start failed with exit status $ppp_start_status; recent PPP log:" >&2
-    tail -n 100 {PPP_LOG_FILE} >&2 || true
+    echo "PPP start failed with exit status $ppp_start_status; diagnostics:" >&2
+    if [ -r {PPP_LOG_FILE} ]; then
+        echo "--- {PPP_LOG_FILE} ---" >&2
+        tail -n 100 {PPP_LOG_FILE} >&2 || true
+    else
+        echo "PPP log is absent: {PPP_LOG_FILE}" >&2
+    fi
+    if command -v journalctl >/dev/null 2>&1; then
+        echo "--- recent ukm journal records ---" >&2
+        journalctl --no-pager -t ukm -n 100 >&2 || true
+    fi
+    for system_log in /var/log/messages /var/log/syslog /var/log/daemon.log; do
+        if [ -r "$system_log" ]; then
+            echo "--- $system_log (ppp-pos2kkt) ---" >&2
+            grep -F 'ppp-pos2kkt' "$system_log" | tail -n 100 >&2 || true
+        fi
+    done
     exit "$ppp_start_status"
 fi
 time_value="$(date +%m%d%H%M%Y)"
