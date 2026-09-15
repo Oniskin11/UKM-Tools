@@ -44,6 +44,7 @@ def build_sync_command() -> str:
     return f'''set -eu
 ukmclient_stopped=0
 ppp_started=0
+kkt_key_copy=""
 cleanup() {{
     if [ "$ppp_started" -eq 1 ]; then
         cd {PPP_DIRECTORY} && {stop_ppp} || true
@@ -51,8 +52,17 @@ cleanup() {{
     if [ "$ukmclient_stopped" -eq 1 ]; then
         /etc/init.d/ukmclient start || true
     fi
+    if [ -n "$kkt_key_copy" ]; then
+        rm -f "$kkt_key_copy" || true
+    fi
 }}
 trap cleanup EXIT HUP INT TERM
+if [ ! -r {KKT_SSH_KEY} ]; then
+    echo "KKT SSH key is unavailable: {KKT_SSH_KEY}" >&2
+    exit 1
+fi
+kkt_key_copy="/tmp/dbrepair-sp_kkt_rsa.$$"
+(umask 077; cp {KKT_SSH_KEY} "$kkt_key_copy")
 /etc/init.d/ukmclient stop
 ukmclient_stopped=1
 cd {PPP_DIRECTORY}
@@ -88,7 +98,7 @@ else
     fi
 fi
 time_value="$(date +%m%d%H%M%Y)"
-ssh -i {KKT_SSH_KEY} -p {KKT_SSH_PORT} -o BatchMode=yes -o ConnectTimeout=10 {KKT_SSH_USER}@{PPP_KKT_IP} "sudo -n date $time_value"
+ssh -i "$kkt_key_copy" -p {KKT_SSH_PORT} -o BatchMode=yes -o ConnectTimeout=10 {KKT_SSH_USER}@{PPP_KKT_IP} "sudo -n date $time_value"
 {stop_ppp}
 ppp_started=0
 /etc/init.d/ukmclient start
