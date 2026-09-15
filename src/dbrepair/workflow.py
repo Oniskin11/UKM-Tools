@@ -422,6 +422,7 @@ class DbRepairWorkflow:
                 f"Архив пустого datadir не найден: {paths.empty_datadir_archive} "
                 "(проверьте paths.empty_datadir_archive в config.toml)."
             )
+        _validate_dbrepair_archive(paths.dbrepair_archive, paths.remote_dbrepair_dir_name)
         _validate_empty_datadir_archive(paths.empty_datadir_archive)
         if session.local_dump_copy not in self._verified_dump_hashes:
             raise WorkflowError("Refusing to replace datadir: the SQL dump was not verified in this workflow session.")
@@ -785,3 +786,20 @@ def _validate_empty_datadir_archive(path: Path) -> None:
             raise WorkflowError("Empty datadir archive may contain only the var directory.")
         if member.issym() or member.islnk() or ".." in name.split("/"):
             raise WorkflowError("Empty datadir archive contains an unsafe link or path.")
+
+
+def _validate_dbrepair_archive(path: Path, directory_name: str) -> None:
+    """Reject path traversal and require the three scripts used by the workflow."""
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            names = set()
+            for member in archive.getmembers():
+                name = member.name.replace("\\", "/").lstrip("./")
+                if not name or name.startswith("/") or ".." in name.split("/") or member.issym() or member.islnk():
+                    raise WorkflowError("dbrepair archive contains an unsafe path or link.")
+                names.add(name)
+    except (tarfile.TarError, OSError) as exc:
+        raise WorkflowError(f"Invalid dbrepair archive: {path}") from exc
+    required = {f"{directory_name}/{name}" for name in ("db.ini", "dbdump.sh", "dbrestore.sh")}
+    if not required.issubset(names):
+        raise WorkflowError("dbrepair archive does not contain db.ini, dbdump.sh and dbrestore.sh in its root directory.")

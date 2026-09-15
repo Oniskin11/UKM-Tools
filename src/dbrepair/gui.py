@@ -22,6 +22,7 @@ from .distsource import build_source
 from .logging_utils import configure_logger
 from .publisher import PublishError, detect_version, publish_distribution
 from .remote import OperationCancelledError
+from .kkt_time import KKT_TIME_STEPS, sync_kkt_time
 from .tspiot import TSPIOT_STEPS, TsPiotInstaller, detect_environment, reboot_host
 from .workflow import DbRepairWorkflow, WORKFLOW_STEPS, WorkflowArtifacts
 
@@ -898,6 +899,61 @@ class TsPiotPanel(BasePanel):
 
 
 # --------------------------------------------------------------------------- #
+# Вкладка «Синхронизация времени ККТ»                                         #
+# --------------------------------------------------------------------------- #
+
+
+class KktTimeTargetView(BaseTargetView):
+    def __init__(self, panel: "BasePanel", notebook: ttk.Notebook, host: str):
+        super().__init__(panel, notebook, host, logger_name="dbrepair.kkt-time", log_prefix="dbrepair-kkt-time")
+
+    def steps(self) -> tuple:
+        return KKT_TIME_STEPS
+
+    def run_all_text(self) -> str:
+        return "Синхронизировать время ККТ"
+
+    def ready_text(self) -> str:
+        return "Готово к синхронизации времени ККТ."
+
+    def running_text(self) -> str:
+        return "Синхронизация времени ККТ..."
+
+    def success_summary(self, step_ids: list[str]) -> str:
+        return "Время ККТ синхронизировано."
+
+    def _run(self, step_ids, config_path, host, cancel_event, progress) -> None:
+        if list(step_ids) != [KKT_TIME_STEPS[0].step_id]:
+            raise ValueError("Поддерживается только синхронизация времени ККТ.")
+        config = override_host(load_config(config_path), host)
+        self.logger.info("Using config %s", config.source_path)
+        self.logger.info("Target host %s", config.connection.host)
+        sync_kkt_time(config, self.logger, cancel_event=cancel_event, progress=progress)
+
+
+class KktTimePanel(BasePanel):
+    def create_target(self, host: str) -> BaseTargetView:
+        return KktTimeTargetView(self, self.notebook, host)
+
+    def ready_overview_text(self) -> str:
+        return "Все готовы к синхронизации времени ККТ."
+
+    def _build_controls(self, controls_frame: ttk.Frame) -> None:
+        ttk.Button(controls_frame, text="Обновить список", command=self._apply_hosts).grid(
+            row=0, column=0, sticky="ew", pady=(0, 8)
+        )
+        ttk.Button(controls_frame, text="Синхронизировать все", command=self._run_all_targets).grid(
+            row=1, column=0, sticky="ew", pady=(0, 8)
+        )
+        ttk.Button(controls_frame, text="Отменить все", command=self._cancel_all_targets).grid(
+            row=2, column=0, sticky="ew", pady=(0, 8)
+        )
+        ttk.Button(controls_frame, text="Очистить список", command=self._clear_hosts).grid(
+            row=3, column=0, sticky="ew"
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Вкладка «Публикация драйвера»                                                #
 # --------------------------------------------------------------------------- #
 
@@ -1392,6 +1448,10 @@ class DbRepairGui:
         tspiot_tab = ttk.Frame(self.outer)
         self.outer.add(tspiot_tab, text="Установка ТС ПИоТ")
         self.tspiot_panel = TsPiotPanel(self.root, tspiot_tab, self.config_path_var)
+
+        kkt_time_tab = ttk.Frame(self.outer)
+        self.outer.add(kkt_time_tab, text="Синхронизация времени ККТ")
+        self.kkt_time_panel = KktTimePanel(self.root, kkt_time_tab, self.config_path_var)
 
         self.publish_tab = ttk.Frame(self.outer)
         self.outer.add(self.publish_tab, text="Публикация файлов")
