@@ -8,9 +8,16 @@ import tomllib
 import tkinter as tk
 from dataclasses import replace
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
-from .config import ConfigError, load_config, override_host, save_publish_password, update_config_sections
+from .config import (
+    ConfigError,
+    load_config,
+    override_host,
+    save_publish_password,
+    update_config_sections,
+    write_default_config,
+)
 from .distsource import build_source
 from .logging_utils import configure_logger
 from .publisher import PublishError, detect_version, publish_kkt
@@ -1336,6 +1343,7 @@ class DbRepairGui:
 
         self._build_styles()
         self._build_ui()
+        self._ensure_config_exists()
         self._apply_source_visibility()
 
     def _build_styles(self) -> None:

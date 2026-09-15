@@ -320,6 +320,69 @@ def _derive_dir_name(archive_name: str) -> str:
     return Path(archive_name).stem
 
 
+DEFAULT_CONFIG_TEXT = """\
+[connection]
+host = "192.168.0.10"
+port = 22
+username = "root"
+password = "xxxxxx"
+timeout = 20
+use_sudo = false
+# sudo_password = "change_me_if_needed"
+
+[database]
+name = "ukmclient"
+password = "CtHDbCGK.C"
+
+[paths]
+dbrepair_archive = "dist/dbrepair6700+.tgz"
+empty_datadir_archive = "dist/mysql5-datadir-empty_46+.tgz"
+local_backup_dir = "backups"
+remote_tmp_dir = "/tmp"
+remote_mysql_dir = "/usr/local/mysql"
+remote_mysql_var_dir = "/usr/local/mysql/var"
+remote_mysql_backup_name = "mysql-db.tgz"
+remote_my_cnf = "/etc/my.cnf"
+remote_dump_filename = "ukmclient.sql"
+
+[services]
+mysql_stop = "/etc/init.d/mysql stop"
+mysql_start = "/etc/init.d/mysql start"
+ukmclient_stop = "/etc/init.d/ukmclient stop"
+ukmclient_start = "/etc/init.d/ukmclient start"
+
+[tspiot]
+target_base = "/usr/local/ukmclient"
+data_dir_name = "data_tspiot"
+binary_name = "tspiot"
+gismt_cert_name = "gismt_cert.txt"
+# owner = "ukmclient:ukmclient"
+
+[distribution]
+# По умолчанию — локальный каталог с дистрибутивами (структура UKM).
+# Для HTTP-источника очистите local_dir и укажите base_url.
+local_dir = "UKM"
+base_url = "http://192.168.20.229/UKM/"
+
+[publish]
+# Нужно только для публикации драйверов по HTTP.
+# Пароль здесь не храним — он запрашивается при публикации.
+host = "192.168.20.229"
+port = 22
+username = "root"
+ukm_dir = "/var/www/files/UKM"
+owner = "www-data:www-data"
+"""
+
+
+def write_default_config(config_path: str | Path) -> Path:
+    """Создать config.toml со стандартными значениями (источник — локальный каталог)."""
+    path = Path(config_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
+    return path
+
+
 def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
