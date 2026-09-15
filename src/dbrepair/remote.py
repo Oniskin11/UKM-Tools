@@ -103,6 +103,7 @@ class RemoteClient:
         use_sudo: bool = False,
         check: bool = True,
         timeout: float | None = None,
+        get_pty: bool | None = None,
     ) -> CommandResult:
         client = self._require_client()
         self._raise_if_cancelled()
@@ -112,7 +113,7 @@ class RemoteClient:
         try:
             stdin, stdout, stderr = client.exec_command(
                 command_to_run,
-                get_pty=bool(use_sudo and self.config.use_sudo),
+                get_pty=bool(use_sudo and self.config.use_sudo) if get_pty is None else get_pty,
                 timeout=timeout,
             )
 

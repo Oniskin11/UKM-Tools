@@ -88,7 +88,8 @@ def sync_kkt_time(
     logger.info("Starting KKT time synchronization on %s", config.connection.host)
     try:
         with RemoteClient(config.connection, logger, cancel_event=cancel_event) as remote:
-            remote.run(build_sync_command(), use_sudo=True, timeout=90)
+            # PPP-скрипты используют terminal utilities; без PTY они завершаются с TERM unset.
+            remote.run(build_sync_command(), use_sudo=True, timeout=90, get_pty=True)
     except Exception as exc:
         if progress is not None:
             progress(step, "error", str(exc))
