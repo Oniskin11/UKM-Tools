@@ -14,7 +14,7 @@
    ```powershell
    python -m venv .venv
    .venv\Scripts\Activate.ps1
-   pip install -r requirements.txt
+   pip install .
    ```
 2. Создайте конфиг из примера и заполните доступ к кассе:
    ```powershell
@@ -59,7 +59,7 @@
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install .
 ```
 
 ## Настройка

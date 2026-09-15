@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from dbrepair.gui import DbRepairGui, expand_safe_step_chain
+from dbrepair.workflow import WORKFLOW_STEPS
 
 
 class ExpandSafeStepChainTests(unittest.TestCase):
@@ -10,10 +11,7 @@ class ExpandSafeStepChainTests(unittest.TestCase):
         self.assertEqual(expand_safe_step_chain("dump_db"), ("dump_db",))
 
     def test_expands_replace_datadir_into_safe_chain(self) -> None:
-        self.assertEqual(
-            expand_safe_step_chain("replace_datadir"),
-            ("replace_datadir", "restore_db", "start_ukmclient"),
-        )
+        self.assertEqual(expand_safe_step_chain("replace_datadir"), tuple(step.step_id for step in WORKFLOW_STEPS))
 
 
 class EnsureConfigExistsTests(unittest.TestCase):
@@ -41,10 +39,7 @@ class EnsureConfigExistsTests(unittest.TestCase):
             self.assertIn("[connection]", path.read_text(encoding="utf-8"))
 
     def test_expands_restore_into_safe_chain(self) -> None:
-        self.assertEqual(
-            expand_safe_step_chain("restore_db"),
-            ("restore_db", "start_ukmclient"),
-        )
+        self.assertEqual(expand_safe_step_chain("restore_db"), tuple(step.step_id for step in WORKFLOW_STEPS))
 
 
 if __name__ == "__main__":

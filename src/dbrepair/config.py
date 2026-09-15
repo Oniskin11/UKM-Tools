@@ -200,6 +200,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         remote_my_cnf=str(paths_raw.get("remote_my_cnf", "/etc/my.cnf")),
         remote_dump_filename=str(paths_raw.get("remote_dump_filename", "ukmclient.sql")),
     )
+    _validate_workflow_paths(paths)
 
     services = ServiceCommands(
         mysql_stop=str(services_raw.get("mysql_stop", ServiceCommands.mysql_stop)),
@@ -333,6 +334,18 @@ def _derive_dir_name(archive_name: str) -> str:
     if archive_name.endswith(".tgz"):
         return archive_name[: -len(".tgz")]
     return Path(archive_name).stem
+
+
+def _validate_workflow_paths(paths: WorkflowPaths) -> None:
+    """Reject paths that could turn the datadir cleanup into a broad rm -rf."""
+    mysql_dir = posixpath.normpath(paths.remote_mysql_dir)
+    var_dir = posixpath.normpath(paths.remote_mysql_var_dir)
+    if not mysql_dir.startswith("/") or mysql_dir == "/":
+        raise ConfigError("remote_mysql_dir must be an absolute non-root path.")
+    if var_dir != posixpath.join(mysql_dir, "var"):
+        raise ConfigError("remote_mysql_var_dir must be exactly <remote_mysql_dir>/var.")
+    if not paths.remote_tmp_dir.startswith("/") or posixpath.normpath(paths.remote_tmp_dir) == "/":
+        raise ConfigError("remote_tmp_dir must be an absolute non-root path.")
 
 
 DEFAULT_CONFIG_TEXT = """\

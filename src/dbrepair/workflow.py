@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from pathlib import Path
 import posixpath
 import shlex
+import tarfile
 import threading
 import time
 
@@ -61,6 +63,7 @@ class WorkflowSession:
     timestamp: str
     local_dump_copy: Path
     remote_dump_copy: str
+    remote_mysql_backup: str
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,7 @@ class DbRepairWorkflow:
         self.config = config
         self.logger = logger
         self.cancel_event = cancel_event
+        self._verified_dump_hashes: dict[Path, str] = {}
 
     def steps(self) -> tuple[WorkflowStep, ...]:
         return WORKFLOW_STEPS
@@ -114,10 +118,15 @@ class DbRepairWorkflow:
             self.config.paths.remote_dbrepair_dir,
             f"{timestamp}-{self.config.paths.remote_dump_filename}",
         )
+        remote_mysql_backup = posixpath.join(
+            self.config.paths.remote_mysql_dir,
+            _timestamped_name(self.config.paths.remote_mysql_backup_name, timestamp),
+        )
         return WorkflowSession(
             timestamp=timestamp,
             local_dump_copy=local_dump_copy,
             remote_dump_copy=remote_dump_copy,
+            remote_mysql_backup=remote_mysql_backup,
         )
 
     def run(
@@ -150,6 +159,7 @@ class DbRepairWorkflow:
     ) -> WorkflowArtifacts:
         if not step_ids:
             raise ValueError("At least one workflow step must be provided.")
+        self._validate_step_plan(step_ids)
 
         session = session or self.create_session()
         steps = [self.get_step(step_id) for step_id in step_ids]
@@ -157,20 +167,30 @@ class DbRepairWorkflow:
         self.logger.info("Starting workflow for %s", self.config.connection.host)
         self._check_cancelled()
         with RemoteClient(self.config.connection, self.logger, cancel_event=self.cancel_event) as remote:
-            for step in steps:
-                self._check_cancelled()
-                self.logger.info("Step %s: %s", step.number, step.title)
-                if progress is not None:
-                    progress(step, "running", None)
-                try:
-                    self._execute_step(step.step_id, remote, session)
-                except Exception as exc:
+            recovery_enabled = False
+            try:
+                for step in steps:
+                    self._check_cancelled()
+                    self.logger.info("Step %s: %s", step.number, step.title)
                     if progress is not None:
-                        progress(step, "error", str(exc))
-                    raise
-                self._check_cancelled()
-                if progress is not None:
-                    progress(step, "success", None)
+                        progress(step, "running", None)
+                    if step.step_id == "enable_recovery":
+                        recovery_enabled = True
+                    try:
+                        self._execute_step(step.step_id, remote, session)
+                    except Exception as exc:
+                        if progress is not None:
+                            progress(step, "error", str(exc))
+                        raise
+                    if step.step_id == "disable_recovery":
+                        recovery_enabled = False
+                    self._check_cancelled()
+                    if progress is not None:
+                        progress(step, "success", None)
+            except Exception:
+                if recovery_enabled:
+                    self._emergency_disable_recovery(remote)
+                raise
 
         self.logger.info("Workflow completed successfully.")
         return self._build_artifacts(session)
@@ -179,8 +199,19 @@ class DbRepairWorkflow:
         return WorkflowArtifacts(
             local_dump_copy=session.local_dump_copy,
             remote_dump_copy=session.remote_dump_copy,
-            remote_mysql_backup=self.config.paths.remote_mysql_backup,
+            remote_mysql_backup=session.remote_mysql_backup,
         )
+
+    def _validate_step_plan(self, step_ids: Sequence[str]) -> None:
+        """Destructive replacement is allowed only in a complete, ordered recovery plan."""
+        if "replace_datadir" not in step_ids:
+            return
+        required = [step.step_id for step in WORKFLOW_STEPS]
+        if list(step_ids) != required:
+            raise WorkflowError(
+                "replace_datadir may only run as part of the complete recovery workflow; "
+                "use Run all steps."
+            )
 
     def _execute_step(
         self,
@@ -268,34 +299,34 @@ class DbRepairWorkflow:
 
         db_ini = remote.read_text(paths.remote_db_ini)
         remote.write_text(paths.remote_db_ini, update_db_ini(db_ini, db.name, db.password))
-        self._wait_for_remote_text(
+        self._wait_for_remote_regex(
             remote,
             paths.remote_db_ini,
-            f"export DBNAME={db.name}",
+            r"^[[:space:]]*export[[:space:]]+DBNAME=",
             description=f"DBNAME in {paths.remote_db_ini}",
         )
-        self._wait_for_remote_text(
+        self._wait_for_remote_regex(
             remote,
             paths.remote_db_ini,
-            f"export DBPASSWORD={db.password}",
+            r"^[[:space:]]*export[[:space:]]+DBPASSWORD=",
             description=f"DBPASSWORD in {paths.remote_db_ini}",
         )
 
     def _step_backup_mysql(self, remote: RemoteClient, session: WorkflowSession) -> None:
-        del session
         paths = self.config.paths
         services = self.config.services
 
         remote.run(services.mysql_stop, use_sudo=True)
         self._wait_for_mysql_stopped(remote)
         remote.run(
-            f"tar czf {shlex.quote(paths.remote_mysql_backup_name)} var",
+            f"tar czf {shlex.quote(session.remote_mysql_backup)} var",
             cwd=paths.remote_mysql_dir,
             use_sudo=True,
         )
+        remote.run(f"tar tzf {shlex.quote(session.remote_mysql_backup)} >/dev/null", use_sudo=True)
         self._wait_for_remote_path(
             remote,
-            paths.remote_mysql_backup,
+            session.remote_mysql_backup,
             path_type="f",
             description=f"backup {paths.remote_mysql_backup}",
             use_sudo=True,
@@ -332,6 +363,16 @@ class DbRepairWorkflow:
             description=f"dump file {self.config.paths.remote_dump_file}",
             use_sudo=True,
         )
+        self._wait_for_remote_condition(
+            remote,
+            _wait_for_remote_test_command(
+                f"test -s {shlex.quote(self.config.paths.remote_dump_file)}",
+                timeout_seconds=REMOTE_STATE_TIMEOUT_SECONDS,
+            ),
+            description=f"non-empty dump file {self.config.paths.remote_dump_file}",
+            timeout_seconds=REMOTE_STATE_TIMEOUT_SECONDS,
+            use_sudo=True,
+        )
 
     def _step_copy_dump(self, remote: RemoteClient, session: WorkflowSession) -> None:
         dump_file = self.config.paths.remote_dump_file
@@ -352,6 +393,11 @@ class DbRepairWorkflow:
             session.local_dump_copy,
             description=f"local dump copy {session.local_dump_copy}",
         )
+        remote_hash = _read_sha256(remote, dump_file)
+        local_hash = _local_sha256(session.local_dump_copy)
+        if remote_hash != local_hash:
+            raise WorkflowError("Downloaded SQL dump checksum does not match the remote file.")
+        self._verified_dump_hashes[session.local_dump_copy] = local_hash
 
     def _step_disable_recovery(self, remote: RemoteClient, session: WorkflowSession) -> None:
         del session
@@ -369,7 +415,6 @@ class DbRepairWorkflow:
         )
 
     def _step_replace_datadir(self, remote: RemoteClient, session: WorkflowSession) -> None:
-        del session
         paths = self.config.paths
 
         if not paths.empty_datadir_archive.is_file():
@@ -377,6 +422,9 @@ class DbRepairWorkflow:
                 f"Архив пустого datadir не найден: {paths.empty_datadir_archive} "
                 "(проверьте paths.empty_datadir_archive в config.toml)."
             )
+        _validate_empty_datadir_archive(paths.empty_datadir_archive)
+        if session.local_dump_copy not in self._verified_dump_hashes:
+            raise WorkflowError("Refusing to replace datadir: the SQL dump was not verified in this workflow session.")
 
         remote.run(f"rm -rf {shlex.quote(paths.remote_mysql_var_dir)}", use_sudo=True)
         self._wait_for_remote_absent(
@@ -418,6 +466,22 @@ class DbRepairWorkflow:
         )
         if SUCCESS_RESTORE not in result.stdout and SUCCESS_RESTORE not in result.stderr:
             raise WorkflowError("dbrestore.sh completed without success marker.")
+        self._wait_for_mysql_started(remote)
+
+    def _emergency_disable_recovery(self, remote: RemoteClient) -> None:
+        """Best-effort cleanup that never hides the original workflow failure."""
+        self.logger.warning("Workflow failed with innodb_force_recovery enabled; attempting emergency cleanup.")
+        try:
+            remote.run(self.config.services.mysql_stop, use_sudo=True, check=False)
+            my_cnf = remote.read_text(self.config.paths.remote_my_cnf, use_sudo=True)
+            remote.write_text(
+                self.config.paths.remote_my_cnf,
+                set_innodb_force_recovery(my_cnf, enabled=False),
+                use_sudo=True,
+            )
+            remote.run(self.config.services.mysql_start, use_sudo=True, check=False)
+        except Exception as exc:
+            self.logger.warning("Emergency recovery cleanup failed: %s", exc)
 
     def _step_start_ukmclient(self, remote: RemoteClient, session: WorkflowSession) -> None:
         del session
@@ -673,3 +737,51 @@ def _wait_for_ukmclient_command(*, running: bool, timeout_seconds: int) -> str:
         "sleep 1; i=$((i+1)); "
         "done; exit 1"
     )
+
+
+def _timestamped_name(name: str, timestamp: str) -> str:
+    path = Path(name)
+    suffix = "".join(path.suffixes)
+    stem = name[: -len(suffix)] if suffix else name
+    return f"{stem}-{timestamp}{suffix}"
+
+
+def _local_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_sha256(remote: RemoteClient, remote_path: str) -> str:
+    quoted = shlex.quote(remote_path)
+    result = remote.run(
+        "if command -v sha256sum >/dev/null 2>&1; then "
+        f"sha256sum {quoted}; "
+        "elif command -v openssl >/dev/null 2>&1; then "
+        f"openssl dgst -sha256 {quoted}; "
+        "else exit 127; fi",
+        use_sudo=True,
+    )
+    for token in result.stdout.split():
+        if len(token) == 64 and all(char in "0123456789abcdefABCDEF" for char in token):
+            return token.lower()
+    raise WorkflowError(f"Could not read SHA-256 for {remote_path}.")
+
+
+def _validate_empty_datadir_archive(path: Path) -> None:
+    """The archive may create only var/ below the selected MySQL directory."""
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            members = archive.getmembers()
+    except (tarfile.TarError, OSError) as exc:
+        raise WorkflowError(f"Invalid empty datadir archive: {path}") from exc
+    if not members:
+        raise WorkflowError(f"Empty datadir archive has no files: {path}")
+    for member in members:
+        name = member.name.replace("\\", "/").lstrip("./")
+        if not name.startswith("var/") and name != "var":
+            raise WorkflowError("Empty datadir archive may contain only the var directory.")
+        if member.issym() or member.islnk() or ".." in name.split("/"):
+            raise WorkflowError("Empty datadir archive contains an unsafe link or path.")
