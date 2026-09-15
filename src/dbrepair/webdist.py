@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+import json
 import urllib.parse
 import urllib.request
 
@@ -58,6 +59,10 @@ def _version_key(name: str) -> tuple[int, ...]:
 
 
 def latest_version(base_url: str, sub: str) -> str:
+    manifest_version = _latest_version_from_manifest(base_url, sub)
+    if manifest_version is not None:
+        return manifest_version
+
     url = urllib.parse.urljoin(base_url, sub)
     versioned = [
         (key, name.rstrip("/"))
@@ -68,6 +73,27 @@ def latest_version(base_url: str, sub: str) -> str:
         raise WebDistError(f"Не найдено ни одной версии в {url}")
     versioned.sort()
     return versioned[-1][1]
+
+
+def _latest_version_from_manifest(base_url: str, sub: str) -> str | None:
+    """Версия из <sub>/latest.json, если указатель опубликован.
+
+    Указатель нужен для версий, которые нельзя корректно сопоставить простым
+    сравнением чисел в имени каталога. Отсутствие файла сохраняет совместимость
+    со старыми HTTP-каталогами: тогда используется directory listing.
+    """
+    manifest_url = urllib.parse.urljoin(base_url, f"{sub.rstrip('/')}/latest.json")
+    try:
+        payload = json.loads(_get_text(manifest_url))
+    except WebDistError:
+        return None
+    except json.JSONDecodeError as exc:
+        raise WebDistError(f"Некорректный указатель последней версии: {manifest_url}") from exc
+
+    version = payload.get("version") if isinstance(payload, dict) else None
+    if not isinstance(version, str) or not version.strip() or not _version_key(version):
+        raise WebDistError(f"Некорректная версия в указателе: {manifest_url}")
+    return version.strip().rstrip("/")
 
 
 def tspiot_url(base_url: str, architecture: str) -> tuple[str, str]:

@@ -2,7 +2,7 @@ import zipfile
 
 import pytest
 
-from dbrepair.publisher import PublishError, collect_kkt_drivers, detect_version
+from dbrepair.publisher import PublishError, collect_kkt_drivers, collect_tspiot_binaries, detect_version
 
 
 def test_detect_version():
@@ -43,3 +43,29 @@ def test_collect_missing(tmp_path):
     (tmp_path / "empty").mkdir()
     with pytest.raises(PublishError):
         collect_kkt_drivers(tmp_path / "empty", tmp_path / "work")
+
+
+def test_collect_tspiot_from_zip_detects_elf_architecture(tmp_path):
+    zip_path = tmp_path / "developer-drop.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("package/bin/tspiot", b"\x7fELF\x02" + b"x64")
+        archive.writestr("other/tspiot.bin", b"\x7fELF\x01" + b"x86")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    binaries = collect_tspiot_binaries(zip_path, work)
+
+    assert set(binaries) == {"x64", "x86"}
+    assert binaries["x64"].read_bytes().startswith(b"\x7fELF\x02")
+
+
+def test_collect_tspiot_from_folder_uses_architecture_in_path(tmp_path):
+    binary = tmp_path / "release" / "x64" / "tspiot"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"not-an-elf")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    binaries = collect_tspiot_binaries(tmp_path / "release", work)
+
+    assert set(binaries) == {"x64"}

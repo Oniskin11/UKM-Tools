@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from dbrepair.config import AppConfig, ConnectionConfig, DatabaseConfig, ServiceCommands, WorkflowPaths, override_host
+from dbrepair.config import AppConfig, ConnectionConfig, DatabaseConfig, ServiceCommands, WorkflowPaths, load_config, override_host
 
 
 class OverrideHostTests(unittest.TestCase):
@@ -29,6 +29,31 @@ class OverrideHostTests(unittest.TestCase):
         self.assertEqual(updated.connection.username, self.config.connection.username)
         self.assertEqual(updated.database, self.config.database)
         self.assertNotEqual(updated.connection, self.config.connection)
+
+
+def test_publish_password_reads_local_dotenv(tmp_path) -> None:
+    (tmp_path / "config.toml").write_text(
+        """[connection]
+host = "cash"
+username = "root"
+[database]
+name = "ukmclient"
+password = "db-password"
+[paths]
+dbrepair_archive = "repair.tgz"
+empty_datadir_archive = "empty.tgz"
+local_backup_dir = "backups"
+[publish]
+host = "web"
+username = "root"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("UKM_PUBLISH_PASSWORD=from-dotenv\n", encoding="utf-8")
+
+    config = load_config(tmp_path / "config.toml")
+    assert config.publish is not None
+    assert config.publish.password == "from-dotenv"
 
 
 if __name__ == "__main__":
