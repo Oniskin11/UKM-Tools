@@ -13,6 +13,7 @@ PPP_START_SCRIPT = "ppp-pos2kkt-start.sh"
 PPP_CASH_IP = "192.168.250.1"
 PPP_KKT_IP = "192.168.250.2"
 PPP_SERIAL_PORT = "/dev/ttyS0"
+PPP_LOG_FILE = "/var/log/ppp-pos_ttyS0.log"
 KKT_SSH_KEY = "/tmp/sp_kkt_rsa"
 KKT_SSH_PORT = 60054
 KKT_SSH_USER = "pi"
@@ -56,8 +57,14 @@ trap cleanup EXIT HUP INT TERM
 ukmclient_stopped=1
 cd {PPP_DIRECTORY}
 {stop_ppp}
-{start_ppp}
-ppp_started=1
+if {start_ppp}; then
+    ppp_started=1
+else
+    ppp_start_status=$?
+    echo "PPP start failed with exit status $ppp_start_status; recent PPP log:" >&2
+    tail -n 100 {PPP_LOG_FILE} >&2 || true
+    exit "$ppp_start_status"
+fi
 time_value="$(date +%m%d%H%M%Y)"
 ssh -i {KKT_SSH_KEY} -p {KKT_SSH_PORT} -o BatchMode=yes -o ConnectTimeout=10 {KKT_SSH_USER}@{PPP_KKT_IP} "sudo -n date $time_value"
 {stop_ppp}
