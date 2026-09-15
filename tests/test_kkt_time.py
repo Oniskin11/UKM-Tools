@@ -11,6 +11,8 @@ class KktTimeCommandTests(unittest.TestCase):
         self.assertIn("192.168.250.1", command)
         self.assertIn("192.168.250.2", command)
         self.assertIn("/dev/ttyS0", command)
+        self.assertIn("sh -x ./ppp-pos2kkt-start.sh", command)
+        self.assertIn("sh -x ./ppp-pos2kkt-stop.sh", command)
         self.assertNotIn("config.toml", command)
 
     def test_is_noninteractive_and_recovers_service(self) -> None:

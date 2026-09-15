@@ -35,10 +35,10 @@ ProgressCallback = Callable[[KktTimeStep, str, str | None], None]
 def build_sync_command() -> str:
     """Команда для кассы: PPP-параметры штатно фиксированы для её конфигурации."""
     stop_ppp = (
-        f"./{PPP_STOP_SCRIPT} 0 {PPP_CASH_IP} {PPP_KKT_IP} {PPP_SERIAL_PORT}"
+        f"sh -x ./{PPP_STOP_SCRIPT} 0 {PPP_CASH_IP} {PPP_KKT_IP} {PPP_SERIAL_PORT}"
     )
     start_ppp = (
-        f"./{PPP_START_SCRIPT} 0 {PPP_CASH_IP} {PPP_KKT_IP} {PPP_SERIAL_PORT}"
+        f"sh -x ./{PPP_START_SCRIPT} 0 {PPP_CASH_IP} {PPP_KKT_IP} {PPP_SERIAL_PORT}"
     )
     return f'''set -eu
 ukmclient_stopped=0
