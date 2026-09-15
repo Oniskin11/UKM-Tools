@@ -19,6 +19,11 @@ class UpdateDbIniTests(unittest.TestCase):
             "# config\nexport DBNAME=ukmclient\nexport DBPASSWORD=CtHDbCGK.C\n",
         )
 
+    def test_quotes_shell_special_characters(self) -> None:
+        result = update_db_ini("", "ukm client", "bad;$(touch nope) 'value'")
+        self.assertIn("export DBNAME='ukm client'", result)
+        self.assertIn("export DBPASSWORD='bad;$(touch nope) '\"'\"'value'\"'\"''", result)
+
 
 class MyCnfEditTests(unittest.TestCase):
     def test_enables_force_recovery(self) -> None:

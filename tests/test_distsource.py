@@ -36,6 +36,15 @@ def test_local_source_selects_latest_and_hashes(tmp_path):
     assert source.expected_sha256(kkt) == expected
 
 
+def test_local_source_prefers_latest_manifest(tmp_path):
+    _make_local_tree(tmp_path)
+    selected = tmp_path / "kkt" / "1.0.0.0.512" / "x86"
+    selected.mkdir(parents=True)
+    (selected / "libsp-kkt-driver-x32.so").write_bytes(b"NEW")
+    (tmp_path / "kkt" / "latest.json").write_text('{"version":"1.0.0.0.512"}', encoding="utf-8")
+    assert LocalDistSource(tmp_path).kkt_driver("x86").version == "1.0.0.0.512"
+
+
 def test_local_source_missing_arch(tmp_path):
     _make_local_tree(tmp_path)
     source = LocalDistSource(tmp_path)

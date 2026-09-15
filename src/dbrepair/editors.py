@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 
 
 DBNAME_PATTERN = re.compile(r"^\s*export\s+DBNAME=.*$")
@@ -16,21 +17,26 @@ def update_db_ini(content: str, db_name: str, db_password: str) -> str:
 
     for line in lines:
         if DBNAME_PATTERN.match(line):
-            updated.append(f"export DBNAME={db_name}")
+            updated.append(_export("DBNAME", db_name))
             has_dbname = True
             continue
         if DBPASSWORD_PATTERN.match(line):
-            updated.append(f"export DBPASSWORD={db_password}")
+            updated.append(_export("DBPASSWORD", db_password))
             has_dbpassword = True
             continue
         updated.append(line)
 
     if not has_dbname:
-        updated.append(f"export DBNAME={db_name}")
+        updated.append(_export("DBNAME", db_name))
     if not has_dbpassword:
-        updated.append(f"export DBPASSWORD={db_password}")
+        updated.append(_export("DBPASSWORD", db_password))
 
     return newline.join(updated).rstrip("\r\n") + newline
+
+
+def _export(name: str, value: str) -> str:
+    """Return a shell-safe export line for dbdump.sh/dbrestore.sh."""
+    return f"export {name}={shlex.quote(value)}"
 
 
 def set_innodb_force_recovery(content: str, enabled: bool) -> str:

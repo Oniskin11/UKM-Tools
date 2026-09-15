@@ -69,3 +69,14 @@ def test_collect_tspiot_from_folder_uses_architecture_in_path(tmp_path):
     binaries = collect_tspiot_binaries(tmp_path / "release", work)
 
     assert set(binaries) == {"x64"}
+
+
+def test_collect_tspiot_ignores_documentation(tmp_path):
+    source = tmp_path / "release"
+    binary = source / "x64" / "tspiot"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"binary")
+    (source / "x64" / "tspiot.txt").write_text("notes", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    assert set(collect_tspiot_binaries(source, work)) == {"x64"}

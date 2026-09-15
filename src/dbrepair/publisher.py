@@ -95,6 +95,8 @@ def collect_tspiot_binaries(source: Path, workdir: Path) -> dict[str, Path]:
         filename = name.replace("\\", "/").split("/")[-1].lower()
         if not filename.startswith("tspiot"):
             return
+        if filename.endswith((".txt", ".md", ".sha256", ".sig")):
+            return
         arch = _architecture(name, payload)
         if arch is None:
             raise PublishError(f"Не удалось определить архитектуру tspiot: {name}")

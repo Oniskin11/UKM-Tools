@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import json
 import re
 import shlex
 
@@ -111,6 +112,17 @@ class LocalDistSource(DistSource):
         base = self.root / sub
         if not base.is_dir():
             raise DistError(f"Каталог не найден: {base}")
+        manifest = base / "latest.json"
+        if manifest.is_file():
+            try:
+                payload = json.loads(manifest.read_text(encoding="utf-8"))
+                version = payload.get("version") if isinstance(payload, dict) else None
+            except (OSError, json.JSONDecodeError) as exc:
+                raise DistError(f"Invalid latest.json: {manifest}") from exc
+            selected = base / version if isinstance(version, str) else None
+            if selected is None or not version.strip() or not selected.is_dir() or not _version_key(version):
+                raise DistError(f"Invalid version in latest.json: {manifest}")
+            return selected
         versioned = [(_version_key(p.name), p) for p in base.iterdir() if p.is_dir() and _version_key(p.name)]
         if not versioned:
             raise DistError(f"Нет ни одной версии в {base}")

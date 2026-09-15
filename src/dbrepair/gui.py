@@ -27,8 +27,8 @@ from .workflow import DbRepairWorkflow, WORKFLOW_STEPS, WorkflowArtifacts
 
 
 SAFE_STEP_CHAINS: dict[str, tuple[str, ...]] = {
-    "replace_datadir": ("replace_datadir", "restore_db", "start_ukmclient"),
-    "restore_db": ("restore_db", "start_ukmclient"),
+    "replace_datadir": tuple(step.step_id for step in WORKFLOW_STEPS),
+    "restore_db": tuple(step.step_id for step in WORKFLOW_STEPS),
 }
 
 
@@ -572,6 +572,13 @@ class DbRepairTargetView(BaseTargetView):
         return "Выполнить все шаги"
 
     def run_step(self, step_id: str) -> bool:
+        if step_id in {"replace_datadir", "restore_db"} and not messagebox.askyesno(
+            "Подтверждение восстановления БД",
+            f"На кассе {self.host} будет выполнено полное восстановление БД. "
+            "Будет создан и проверен бэкап, затем старый datadir будет заменён. Продолжить?",
+            parent=self.frame.winfo_toplevel(),
+        ):
+            return False
         effective = list(expand_safe_step_chain(step_id))
         if len(effective) > 1:
             caption = " -> ".join(_step_number(candidate) for candidate in effective)

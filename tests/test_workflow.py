@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 
 from dbrepair.config import AppConfig, ConnectionConfig, DatabaseConfig, ServiceCommands, WorkflowPaths
-from dbrepair.workflow import DbRepairWorkflow, SUCCESS_RESTORE
+from dbrepair.workflow import DbRepairWorkflow, SUCCESS_RESTORE, WorkflowError
 
 
 class FakeLogger:
@@ -71,6 +71,13 @@ class WorkflowStopUkmclientTests(unittest.TestCase):
         self.workflow._execute_step("start_ukmclient", remote, self.session)
 
         self.assertEqual(remote.commands[0][0], self.config.services.ukmclient_start)
+
+    def test_rejects_datadir_replacement_without_complete_workflow(self) -> None:
+        with self.assertRaises(WorkflowError):
+            self.workflow.run_step("replace_datadir", session=self.session)
+
+    def test_session_uses_unique_mysql_backup_name(self) -> None:
+        self.assertTrue(self.session.remote_mysql_backup.endswith("mysql-db-20260308-120000-000000.tgz"))
 
 
 if __name__ == "__main__":
