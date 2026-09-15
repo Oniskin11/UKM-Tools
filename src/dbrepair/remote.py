@@ -165,6 +165,24 @@ class RemoteClient:
 
         return result
 
+    def open_tcp_channel(self, host: str, port: int, *, timeout: float) -> Any:
+        """Open a TCP connection from the remote cash node through the SSH tunnel."""
+        self._raise_if_cancelled()
+        transport = self._require_client().get_transport()
+        if transport is None or not transport.is_active():
+            raise RuntimeError("SSH transport is not active.")
+        try:
+            return transport.open_channel(
+                "direct-tcpip",
+                dest_addr=(host, port),
+                src_addr=("127.0.0.1", 0),
+                timeout=timeout,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to connect from cash node to {host}:{port}: {exc}"
+            ) from exc
+
     def read_text(self, remote_path: str, *, use_sudo: bool = False) -> str:
         self._raise_if_cancelled()
         if use_sudo and self.config.use_sudo:
