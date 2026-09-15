@@ -4,24 +4,24 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 import re
+import shlex
 import threading
-from typing import Any
 import uuid
 from xml.etree import ElementTree
 
 from .config import AppConfig
-from .remote import OperationCancelledError, RemoteClient
+from .remote import RemoteClient
 
-PPP_KKT_IP = "192.168.250.2"
-KKT_API_PORT = 6667
-KKT_API_TIMEOUT = 15
+KKT_SERIAL_PORT = "/dev/ttyS0"
+KKT_SERIAL_BAUDRATE = 115200
+KKT_SERIAL_RESPONSE_TIMEOUT = 10
+KKT_SYNC_TIMEOUT = 45
 KKT_PROTOCOL_LABEL = "OFDFNARMUKM"
 KKT_PROTOCOL_VERSION = "13.0"
 KKT_FFD_VERSION = "4"
 KKT_CONTAINER_VERSION = "1"
 KKT_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-_RESPONSE_END = b"</ArmResponse>"
-_MAX_RESPONSE_BYTES = 1_048_576
+_RESPONSE_MARKER = "__DBREPAIR_KKT_RESPONSE__"
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ ProgressCallback = Callable[[KktTimeStep, str, str | None], None]
 
 
 class KktApiError(RuntimeError):
-    """The KKT accepted the connection but rejected an API request."""
+    """The KKT rejected a command or returned an invalid response."""
 
 
 def build_kkt_request(
@@ -66,114 +66,80 @@ def build_kkt_request(
 </ArmRequest>'''
 
 
-class KktApiClient:
-    def __init__(
-        self,
-        remote: RemoteClient,
-        *,
-        cancel_event: threading.Event | None = None,
-    ) -> None:
-        self.remote = remote
-        self.cancel_event = cancel_event
-
-    def get_status(self, request_datetime: datetime) -> int:
-        response = self._request(2, 3, request_datetime=request_datetime)
-        shift_state = self._response_value(response, "ShiftState")
-        try:
-            return int(shift_state)
-        except (TypeError, ValueError) as exc:
-            raise KktApiError("KKT response does not contain a valid ShiftState.") from exc
-
-    def set_datetime(self, value: datetime) -> None:
-        data = f'<pa n="200001" t="7"><pa n="DateTime" t="5">{value.strftime(KKT_DATETIME_FORMAT)}</pa></pa>'
-        self._request(24, 25, request_datetime=value, data=data)
-
-    def get_datetime(self, request_datetime: datetime) -> datetime:
-        response = self._request(22, 23, request_datetime=request_datetime)
-        value = self._response_value(response, "DateTime")
-        try:
-            return datetime.strptime(value, KKT_DATETIME_FORMAT)
-        except (TypeError, ValueError) as exc:
-            raise KktApiError(f"KKT returned an invalid date and time: {value!r}") from exc
-
-    def _request(
-        self,
-        command: int,
-        response_command: int,
-        *,
-        request_datetime: datetime,
-        data: str = "",
-    ) -> ElementTree.Element:
-        self._raise_if_cancelled()
-        payload = build_kkt_request(
-            command,
-            request_datetime=request_datetime,
-            data=data,
-        ).encode("utf-8")
-        channel = self.remote.open_tcp_channel(
-            PPP_KKT_IP,
-            KKT_API_PORT,
-            timeout=KKT_API_TIMEOUT,
-        )
-        try:
-            channel.settimeout(KKT_API_TIMEOUT)
-            channel.sendall(payload)
-            response = bytearray()
-            while _RESPONSE_END not in response:
-                self._raise_if_cancelled(channel)
-                chunk = channel.recv(4096)
-                if not chunk:
-                    raise KktApiError("KKT closed the API connection before sending a response.")
-                response.extend(chunk)
-                if len(response) > _MAX_RESPONSE_BYTES:
-                    raise KktApiError("KKT API response exceeds the allowed size.")
-        except OperationCancelledError:
-            raise
-        except KktApiError:
-            raise
-        except Exception as exc:
-            raise KktApiError(f"KKT API command {command} failed: {exc}") from exc
-        finally:
-            channel.close()
-
-        try:
-            root = ElementTree.fromstring(bytes(response))
-        except ElementTree.ParseError as exc:
-            raise KktApiError("KKT returned malformed XML.") from exc
-        result = root.findtext("./ResponseBody/Result")
-        error_code = root.findtext("./ResponseBody/ErrorCode")
-        error_description = root.findtext("./ResponseBody/ErrorDescription") or ""
-        actual_command = root.findtext("./ResponseBody/Command")
-        if result != "0":
-            raise KktApiError(
-                f"KKT API command {command} was rejected: "
-                f"result={result!r}, error={error_code!r} {error_description.strip()}"
-            )
-        if actual_command != str(response_command):
-            raise KktApiError(
-                f"KKT API command {command} returned unexpected command {actual_command!r}."
-            )
-        return root
-
-    @staticmethod
-    def _response_value(response: ElementTree.Element, name: str) -> str | None:
-        data = response.findtext("./ResponseData") or ""
-        match = re.search(
-            rf'<pa\s+[^>]*n="{re.escape(name)}"[^>]*>(.*?)</pa>',
-            data,
-            flags=re.DOTALL,
-        )
-        return match.group(1).strip() if match else None
-
-    def _raise_if_cancelled(self, channel: Any | None = None) -> None:
-        if self.cancel_event is None or not self.cancel_event.is_set():
-            return
-        if channel is not None:
-            try:
-                channel.close()
-            except Exception:
-                pass
-        raise OperationCancelledError("Operation cancelled by user.")
+def build_serial_sync_command(cash_time: datetime) -> str:
+    """Exchange KKT raw XML through RS-232 and always restore ukmclient."""
+    status_request = build_kkt_request(2, request_datetime=cash_time)
+    set_data = (
+        '<pa n="200001" t="7"><pa n="DateTime" t="5">'
+        f"{cash_time.strftime(KKT_DATETIME_FORMAT)}</pa></pa>"
+    )
+    set_request = build_kkt_request(24, request_datetime=cash_time, data=set_data)
+    verify_request = build_kkt_request(22, request_datetime=cash_time)
+    script = f'''set -eu
+serial_port={shlex.quote(KKT_SERIAL_PORT)}
+serial_state=""
+ukmclient_stopped=0
+serial_open=0
+cleanup() {{
+    if [ "$serial_open" -eq 1 ]; then
+        exec 3>&- || true
+        exec 3<&- || true
+    fi
+    if [ -n "$serial_state" ]; then
+        stty -F "$serial_port" "$serial_state" || true
+    fi
+    if [ "$ukmclient_stopped" -eq 1 ]; then
+        /etc/init.d/ukmclient start || true
+    fi
+}}
+trap cleanup EXIT HUP INT TERM
+status_request={shlex.quote(status_request)}
+set_request={shlex.quote(set_request)}
+verify_request={shlex.quote(verify_request)}
+/etc/init.d/ukmclient stop
+ukmclient_stopped=1
+sleep 1
+serial_state="$(stty -F "$serial_port" -g)"
+stty -F "$serial_port" {KKT_SERIAL_BAUDRATE} cs8 -cstopb -parenb -ixon -ixoff -crtscts -icanon -isig -iexten -echo min 1 time 0
+exec 3<>"$serial_port"
+serial_open=1
+exchange() {{
+    request="$1"
+    response=""
+    char=""
+    printf '%s' "$request" >&3
+    while :; do
+        char=""
+        if ! IFS= read -r -n 1 -t {KKT_SERIAL_RESPONSE_TIMEOUT} char <&3; then
+            echo "Timed out waiting for KKT response on $serial_port" >&2
+            return 1
+        fi
+        response="$response$char"
+        case "$response" in
+            *'</ArmResponse>')
+                printf '%s' "$response"
+                return 0
+                ;;
+        esac
+    done
+}}
+status_response="$(exchange "$status_request")"
+if [[ "$status_response" != *'<Result>0</Result>'* ]] || [[ "$status_response" != *'<Command>3</Command>'* ]]; then
+    echo "KKT GetStatus failed: $status_response" >&2
+    exit 1
+fi
+if [[ "$status_response" != *'n="ShiftState" t="4">0</pa>'* ]]; then
+    echo "KKT shift is open; date and time cannot be changed." >&2
+    exit 1
+fi
+set_response="$(exchange "$set_request")"
+if [[ "$set_response" != *'<Result>0</Result>'* ]] || [[ "$set_response" != *'<Command>25</Command>'* ]]; then
+    echo "KKT DateTimeSet failed: $set_response" >&2
+    exit 1
+fi
+verify_response="$(exchange "$verify_request")"
+printf '%s\\n%s\\n' '{_RESPONSE_MARKER}' "$verify_response"'''
+    return f"bash -c {shlex.quote(script)}"
 
 
 def _cash_datetime(remote: RemoteClient) -> datetime:
@@ -184,6 +150,45 @@ def _cash_datetime(remote: RemoteClient) -> datetime:
         raise RuntimeError(f"Cash node returned an invalid current time: {result.stdout!r}") from exc
 
 
+def _extract_response(output: str) -> ElementTree.Element:
+    marker_index = output.find(_RESPONSE_MARKER)
+    if marker_index < 0:
+        raise KktApiError("KKT serial exchange did not return a verification response.")
+    xml_start = output.find("<ArmResponse>", marker_index)
+    xml_end = output.find("</ArmResponse>", xml_start)
+    if xml_start < 0 or xml_end < 0:
+        raise KktApiError("KKT serial exchange returned malformed XML.")
+    try:
+        return ElementTree.fromstring(output[xml_start : xml_end + len("</ArmResponse>")])
+    except ElementTree.ParseError as exc:
+        raise KktApiError("KKT serial exchange returned malformed XML.") from exc
+
+
+def _response_value(response: ElementTree.Element, name: str) -> str | None:
+    data = response.findtext("./ResponseData") or ""
+    match = re.search(
+        rf'<pa\s+[^>]*n="{re.escape(name)}"[^>]*>(.*?)</pa>',
+        data,
+        flags=re.DOTALL,
+    )
+    return match.group(1).strip() if match else None
+
+
+def _verified_kkt_datetime(output: str) -> datetime:
+    response = _extract_response(output)
+    result = response.findtext("./ResponseBody/Result")
+    command = response.findtext("./ResponseBody/Command")
+    if result != "0" or command != "23":
+        raise KktApiError(
+            f"KKT DateTimeGet failed: result={result!r}, command={command!r}."
+        )
+    value = _response_value(response, "DateTime")
+    try:
+        return datetime.strptime(value, KKT_DATETIME_FORMAT)
+    except (TypeError, ValueError) as exc:
+        raise KktApiError(f"KKT returned an invalid date and time: {value!r}") from exc
+
+
 def sync_kkt_time(
     config: AppConfig,
     logger,
@@ -191,23 +196,22 @@ def sync_kkt_time(
     cancel_event: threading.Event | None = None,
     progress: ProgressCallback | None = None,
 ) -> None:
-    """Synchronize KKT time through its documented TCP/XML API."""
+    """Synchronize KKT time through its documented raw RS-232 XML API."""
     step = KKT_TIME_STEPS[0]
     if progress is not None:
         progress(step, "running", None)
-    logger.info("Starting KKT time synchronization on %s via API", config.connection.host)
+    logger.info("Starting KKT time synchronization on %s via RS-232 API", config.connection.host)
     try:
         with RemoteClient(config.connection, logger, cancel_event=cancel_event) as remote:
             cash_time = _cash_datetime(remote)
-            api = KktApiClient(remote, cancel_event=cancel_event)
-            shift_state = api.get_status(cash_time)
-            if shift_state != 0:
-                raise KktApiError(
-                    "KKT shift is open; the API forbids changing date and time until it is closed."
-                )
-            api.set_datetime(cash_time)
-            kkt_time = api.get_datetime(cash_time)
-            if abs((kkt_time - cash_time).total_seconds()) > KKT_API_TIMEOUT:
+            result = remote.run(
+                build_serial_sync_command(cash_time),
+                use_sudo=True,
+                timeout=KKT_SYNC_TIMEOUT,
+                get_pty=False,
+            )
+            kkt_time = _verified_kkt_datetime(result.stdout)
+            if abs((kkt_time - cash_time).total_seconds()) > KKT_SERIAL_RESPONSE_TIMEOUT:
                 raise KktApiError(
                     f"KKT time verification failed: expected {cash_time}, received {kkt_time}."
                 )
@@ -216,5 +220,5 @@ def sync_kkt_time(
             progress(step, "error", str(exc))
         raise
     if progress is not None:
-        progress(step, "success", "Время ККТ синхронизировано через API")
-    logger.info("KKT time synchronization completed on %s via API", config.connection.host)
+        progress(step, "success", "Время ККТ синхронизировано через RS-232 API")
+    logger.info("KKT time synchronization completed on %s via RS-232 API", config.connection.host)
