@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from dbrepair.kkt_time import build_sync_command
+from dbrepair.kkt_time import build_sync_command, sync_kkt_time
 
 
 class KktTimeCommandTests(unittest.TestCase):
@@ -28,6 +30,29 @@ class KktTimeCommandTests(unittest.TestCase):
         command = build_sync_command()
         self.assertIn('time_value="$(date +%m%d%H%M%Y)"', command)
         self.assertIn('"sudo -n date $time_value"', command)
+
+    def test_requests_terminal_for_ppp_scripts(self) -> None:
+        calls: list[dict] = []
+
+        class Remote:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                pass
+
+            def run(self, _command, **kwargs) -> None:
+                calls.append(kwargs)
+
+        config = SimpleNamespace(connection=SimpleNamespace(host="cash"))
+        logger = SimpleNamespace(info=lambda *_args: None)
+        with patch("dbrepair.kkt_time.RemoteClient", Remote):
+            sync_kkt_time(config, logger)
+
+        self.assertEqual(calls, [{"use_sudo": True, "timeout": 90, "get_pty": True}])
 
 
 if __name__ == "__main__":
