@@ -1390,6 +1390,14 @@ class DbRepairGui:
         self.outer.add(self.publish_tab, text="Публикация файлов")
         self.publish_panel = PublishPanel(self.root, self.publish_tab, self.config_path_var)
 
+    def _ensure_config_exists(self) -> None:
+        """Создать стартовый config.toml, если GUI запустили впервые."""
+        configured_path = self.config_path_var.get().strip() or "config.toml"
+        path = Path(configured_path)
+        if not path.is_file():
+            write_default_config(path)
+        self.config_path_var.set(str(path))
+
     def _current_source_is_http(self) -> bool:
         try:
             config = load_config(self.config_path_var.get().strip())
