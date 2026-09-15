@@ -218,7 +218,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     distribution = _load_distribution(base_dir, distribution_raw) if isinstance(distribution_raw, dict) else None
 
     publish_raw = raw.get("publish")
-    publish = _load_publish(publish_raw) if isinstance(publish_raw, dict) else None
+    publish = _load_publish(base_dir, publish_raw) if isinstance(publish_raw, dict) else None
 
     return AppConfig(
         connection=connection,
@@ -256,15 +256,30 @@ def _load_distribution(base_dir: Path, raw: dict) -> DistributionConfig:
     return DistributionConfig(base_url=base_url, local_dir=local_dir)
 
 
-def _load_publish(raw: dict) -> PublishConfig:
+def _load_publish(base_dir: Path, raw: dict) -> PublishConfig:
     return PublishConfig(
         host=_require_str(raw, "host"),
         username=_require_str(raw, "username"),
-        password=_optional_str(raw, "password"),
+        password=_optional_str(raw, "password") or _dotenv_value(base_dir, "UKM_PUBLISH_PASSWORD"),
         port=int(raw.get("port", 22)),
         ukm_dir=str(raw.get("ukm_dir", "/var/www/files/UKM")),
         owner=str(raw.get("owner", "www-data:www-data")),
     )
+
+
+def _dotenv_value(base_dir: Path, key: str) -> str | None:
+    """Прочитать единственное значение из локального .env без внешней зависимости."""
+    path = base_dir / ".env"
+    if not path.is_file():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        if name.strip() == key:
+            return value.strip() or None
+    return None
 
 
 def override_host(config: AppConfig, host: str | None) -> AppConfig:

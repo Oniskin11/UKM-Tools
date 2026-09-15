@@ -20,7 +20,7 @@ from .config import (
 )
 from .distsource import build_source
 from .logging_utils import configure_logger
-from .publisher import PublishError, detect_version, publish_kkt
+from .publisher import PublishError, detect_version, publish_distribution
 from .remote import OperationCancelledError
 from .tspiot import TSPIOT_STEPS, TsPiotInstaller, detect_environment, reboot_host
 from .workflow import DbRepairWorkflow, WORKFLOW_STEPS, WorkflowArtifacts
@@ -896,7 +896,7 @@ class TsPiotPanel(BasePanel):
 
 
 class PublishPanel:
-    """Публикация драйвера ККТ (zip или папка) на веб-сервер: заливка + sha256."""
+    """Публикация ККТ и ТС ПИоТ из одного ZIP или каталога на веб-сервер."""
 
     def __init__(self, root: tk.Tk, parent: ttk.Frame, config_path_var: tk.StringVar):
         self.root = root
@@ -904,7 +904,7 @@ class PublishPanel:
         self.event_queue: "queue.Queue[tuple]" = queue.Queue()
         self.source_var = tk.StringVar()
         self.version_var = tk.StringVar()
-        self.summary_var = tk.StringVar(value="Выберите zip-архив или папку с драйвером ККТ.")
+        self.summary_var = tk.StringVar(value="Выберите zip-архив или папку с драйвером ККТ и/или ТС ПИоТ.")
         self.busy = False
 
         queue_handler = QueueLogHandler(self.event_queue, "publish")
@@ -926,7 +926,7 @@ class PublishPanel:
         form.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 0))
         form.columnconfigure(1, weight=1)
 
-        ttk.Label(form, text="Файл (.zip) или папка драйвера").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(form, text="Файл (.zip) или папка дистрибутива").grid(row=0, column=0, sticky="w", padx=(0, 8))
         ttk.Entry(form, textvariable=self.source_var).grid(row=0, column=1, sticky="ew")
         btns = ttk.Frame(form)
         btns.grid(row=0, column=2, padx=(8, 0))
@@ -1061,7 +1061,7 @@ class PublishPanel:
             if config.publish is None:
                 raise PublishError("В config.toml отсутствует секция [publish] (доступ к веб-серверу).")
             publish_config = replace(config.publish, password=password)
-            result = publish_kkt(publish_config, Path(source), self.logger, version=version or None)
+            result = publish_distribution(publish_config, Path(source), self.logger, version=version or None)
             if save:
                 try:
                     save_publish_password(config_path, password)
@@ -1089,8 +1089,12 @@ class PublishPanel:
                 if error:
                     self.summary_var.set(f"Ошибка: {_shorten(error)}")
                 else:
-                    archs = ", ".join(f"{a}={h[:12]}…" for a, h in sorted(result.hashes.items()))
-                    self.summary_var.set(f"Опубликовано KKT v{result.version} ({archs}).")
+                    parts = []
+                    if result.hashes:
+                        parts.append("KKT: " + ", ".join(sorted(result.hashes)))
+                    if result.tspiot_hashes:
+                        parts.append("ТС ПИоТ: " + ", ".join(sorted(result.tspiot_hashes)))
+                    self.summary_var.set(f"Опубликовано v{result.version} ({'; '.join(parts)}).")
         self.root.after(100, self._process_events)
 
     def _append_log(self, message: str) -> None:
@@ -1383,7 +1387,7 @@ class DbRepairGui:
         self.tspiot_panel = TsPiotPanel(self.root, tspiot_tab, self.config_path_var)
 
         self.publish_tab = ttk.Frame(self.outer)
-        self.outer.add(self.publish_tab, text="Публикация драйвера")
+        self.outer.add(self.publish_tab, text="Публикация файлов")
         self.publish_panel = PublishPanel(self.root, self.publish_tab, self.config_path_var)
 
     def _current_source_is_http(self) -> bool:
@@ -1403,7 +1407,7 @@ class DbRepairGui:
         is_http = self._current_source_is_http()
         try:
             if is_http:
-                self.outer.add(self.publish_tab, text="Публикация драйвера")
+                self.outer.add(self.publish_tab, text="Публикация файлов")
             else:
                 self.outer.hide(self.publish_tab)
         except tk.TclError:

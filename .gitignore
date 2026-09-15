@@ -13,6 +13,7 @@ dist/
 
 # Local (secret) config — commit only config.example.toml
 config.toml
+.env
 
 # Distribution artifacts (раздаются с веб-сервера, не хранятся в репозитории)
 *.7z

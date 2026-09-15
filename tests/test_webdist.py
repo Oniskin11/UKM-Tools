@@ -1,4 +1,15 @@
+import pytest
+
 from dbrepair import webdist
+
+
+@pytest.fixture(autouse=True)
+def no_manifest_by_default(monkeypatch):
+    """Тесты directory listing не должны ходить в сеть за latest.json."""
+    def missing(url, timeout=20.0):
+        raise webdist.WebDistError("404")
+
+    monkeypatch.setattr(webdist, "_get_text", missing)
 
 
 def test_version_key():
@@ -16,6 +27,26 @@ def test_latest_version_picks_max(monkeypatch):
     assert webdist.latest_version("http://x/UKM/", "kkt/") == "1.5.18.209"
 
 
+def test_latest_version_prefers_published_pointer(monkeypatch):
+    def fake_get_text(url, timeout=20.0):
+        if url.endswith("/kkt/latest.json"):
+            return '{"version": "1.0.0.0.512"}'
+        raise webdist.WebDistError("404")
+
+    monkeypatch.setattr(webdist, "_get_text", fake_get_text)
+    monkeypatch.setattr(webdist, "_list", lambda url, timeout=20.0: ["1.5.19.211/"])
+    assert webdist.latest_version("http://x/UKM/", "kkt/") == "1.0.0.0.512"
+
+
+def test_latest_version_falls_back_when_pointer_missing(monkeypatch):
+    def fake_get_text(url, timeout=20.0):
+        raise webdist.WebDistError("404")
+
+    monkeypatch.setattr(webdist, "_get_text", fake_get_text)
+    monkeypatch.setattr(webdist, "_list", lambda url, timeout=20.0: ["1.5.19.211/"])
+    assert webdist.latest_version("http://x/UKM/", "kkt/") == "1.5.19.211"
+
+
 def test_latest_version_raises_when_empty(monkeypatch):
     monkeypatch.setattr(webdist, "_list", lambda url, timeout=20.0: ["readme.txt"])
     try:
@@ -30,6 +61,17 @@ def test_tspiot_url(monkeypatch):
     url, version = webdist.tspiot_url("http://x/UKM/", "x86")
     assert version == "1.0.0.0"
     assert url == "http://x/UKM/tspiot/1.0.0.0/x86/tspiot"
+
+
+def test_tspiot_url_uses_published_pointer(monkeypatch):
+    monkeypatch.setattr(
+        webdist,
+        "_get_text",
+        lambda url, timeout=20.0: '{"version":"2.0.0.0"}' if url.endswith("/tspiot/latest.json") else (_ for _ in ()).throw(webdist.WebDistError("404")),
+    )
+    url, version = webdist.tspiot_url("http://x/UKM/", "x64")
+    assert version == "2.0.0.0"
+    assert url == "http://x/UKM/tspiot/2.0.0.0/x64/tspiot"
 
 
 def test_kkt_driver_url(monkeypatch):
