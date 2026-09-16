@@ -23,6 +23,7 @@ from .logging_utils import configure_logger
 from .publisher import PublishError, detect_version, publish_distribution
 from .remote import OperationCancelledError
 from .kkt_time import KKT_TIME_STEPS, sync_kkt_time
+from .mysql_rebuild import MYSQL_REBUILD_STEPS, MysqlRebuildWorkflow
 from .tspiot import TSPIOT_STEPS, TsPiotInstaller, detect_environment, reboot_host
 from .workflow import DbRepairWorkflow, WORKFLOW_STEPS, WorkflowArtifacts
 
@@ -648,6 +649,75 @@ class DbRepairPanel(BasePanel):
         ttk.Button(controls_frame, text="Очистить список", command=self._clear_hosts).grid(
             row=0, column=3
         )
+
+
+# --------------------------------------------------------------------------- #
+# Вкладка «Пересборка MySQL»                                                   #
+# --------------------------------------------------------------------------- #
+
+
+class MysqlRebuildTargetView(BaseTargetView):
+    def __init__(self, panel: "BasePanel", notebook: ttk.Notebook, host: str):
+        super().__init__(
+            panel, notebook, host, logger_name="dbrepair.mysql-rebuild", log_prefix="dbrepair-mysql-rebuild"
+        )
+
+    def steps(self) -> tuple:
+        return MYSQL_REBUILD_STEPS
+
+    def run_all_text(self) -> str:
+        return "Пересобрать MySQL"
+
+    def ready_text(self) -> str:
+        return "Готово к пересборке чистой MySQL. Данные текущей базы будут заменены."
+
+    def running_text(self) -> str:
+        return "Пересборка MySQL..."
+
+    def run_step(self, step_id: str) -> bool:
+        self.summary_var.set("Отдельные шаги отключены: пересборка выполняется только полным планом.")
+        return False
+
+    def run_all(self) -> bool:
+        if not messagebox.askyesno(
+            "Подтверждение пересборки MySQL",
+            f"На кассе {self.host} текущий datadir MySQL будет заменён чистым. "
+            "Прежний каталог будет сохранён как var_badN. Продолжить?",
+            icon="warning",
+            parent=self.frame.winfo_toplevel(),
+        ):
+            return False
+        return self.start_worker([step.step_id for step in MYSQL_REBUILD_STEPS], reset=True)
+
+    def success_summary(self, step_ids: list[str]) -> str:
+        del step_ids
+        return "MySQL пересобрана, схема UKM проверена, ukmclient запущен."
+
+    def _run(self, step_ids, config_path, host, cancel_event, progress) -> None:
+        config = override_host(load_config(config_path), host)
+        self.logger.info("Using config %s", config.source_path)
+        self.logger.info("Target host %s", config.connection.host)
+        MysqlRebuildWorkflow(config, self.logger, cancel_event=cancel_event).run_steps(step_ids, progress=progress)
+
+
+class MysqlRebuildPanel(BasePanel):
+    def create_target(self, host: str) -> BaseTargetView:
+        return MysqlRebuildTargetView(self, self.notebook, host)
+
+    def ready_overview_text(self) -> str:
+        return "Все готовы к пересборке MySQL."
+
+    def _build_controls(self, controls_frame: ttk.Frame) -> None:
+        ttk.Button(controls_frame, text="Обновить список", command=self._apply_hosts).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(
+            controls_frame, text="Пересобрать на всех", command=self._run_all_targets, style="Accent.TButton"
+        ).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(controls_frame, text="Отменить все", command=self._cancel_all_targets).grid(
+            row=0, column=2, padx=(0, 8)
+        )
+        ttk.Button(controls_frame, text="Очистить список", command=self._clear_hosts).grid(row=0, column=3)
 
 
 # --------------------------------------------------------------------------- #
@@ -1507,6 +1577,10 @@ class DbRepairGui:
         db_tab = ttk.Frame(self.outer)
         self.outer.add(db_tab, text="Восстановление БД")
         self.db_panel = DbRepairPanel(self.root, db_tab, self.config_path_var)
+
+        mysql_rebuild_tab = ttk.Frame(self.outer)
+        self.outer.add(mysql_rebuild_tab, text="Пересборка MySQL")
+        self.mysql_rebuild_panel = MysqlRebuildPanel(self.root, mysql_rebuild_tab, self.config_path_var)
 
         tspiot_tab = ttk.Frame(self.outer)
         self.outer.add(tspiot_tab, text="Установка ТС ПИоТ")
