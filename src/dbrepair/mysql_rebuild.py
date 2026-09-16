@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+import shlex
 from typing import Callable, Sequence
 
 from .config import AppConfig
@@ -39,12 +40,14 @@ class MysqlRebuildWorkflow:
                 if progress:
                     progress(step, "running", None)
                 try:
-                    command = {
-                        "preflight": self._preflight_command,
-                        "rebuild": self._rebuild_command,
-                        "verify": self._verify_command,
-                    }[step.step_id]()
-                    remote.run(command, timeout=900 if step.step_id == "rebuild" else 90)
+                    if step.step_id == "verify":
+                        self._verify_with_database_password(remote)
+                    else:
+                        command = {
+                            "preflight": self._preflight_command,
+                            "rebuild": self._rebuild_command,
+                        }[step.step_id]()
+                        remote.run(command, timeout=900 if step.step_id == "rebuild" else 90)
                     if step.step_id == "rebuild":
                         self._apply_standard_grants(remote)
                 except Exception as exc:
@@ -53,6 +56,18 @@ class MysqlRebuildWorkflow:
                     raise
                 if progress:
                     progress(step, "success", None)
+
+    def _verify_with_database_password(self, remote: RemoteClient) -> None:
+        """Verify MySQL through a temporary client file so the password never reaches logs."""
+        path = f"/tmp/.dbrepair-mysql-client-{uuid.uuid4().hex}.cnf"
+        password = self.config.database.password.replace("\\", "\\\\").replace('"', '\\"')
+        client_config = f'[client]\nuser=root\npassword="{password}"\n'
+        remote.write_text(path, client_config)
+        try:
+            remote.run(f"chmod 600 {shlex.quote(path)}", timeout=30)
+            remote.run(self._verify_command(path), timeout=90)
+        finally:
+            remote.run(f"rm -f {shlex.quote(path)}", check=False)
 
     def _apply_standard_grants(self, remote: RemoteClient) -> None:
         """Apply the legacy UKM local accounts without logging their password."""
@@ -178,10 +193,11 @@ resolve_source_server() {
 }
 """
 
-    def _verify_command(self) -> str:
-        return """set -eu
-mysqladmin ping --silent >/dev/null
-mysql -N -e "SHOW DATABASES" | grep -Fx ukmclient >/dev/null
+    def _verify_command(self, client_config: str) -> str:
+        client_option = shlex.quote(f"--defaults-extra-file={client_config}")
+        return f"""set -eu
+mysqladmin {client_option} ping --silent >/dev/null
+mysql {client_option} -N -e "SHOW DATABASES" | grep -Fx ukmclient >/dev/null
 /etc/init.d/ukmclient start
 i=0; while [ "$i" -lt 30 ]; do pgrep -x ukmclient >/dev/null 2>&1 && exit 0; sleep 1; i=$((i + 1)); done
 echo 'ukmclient did not start' >&2

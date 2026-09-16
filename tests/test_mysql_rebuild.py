@@ -43,6 +43,28 @@ class MysqlRebuildTests(unittest.TestCase):
     def test_plan_has_preflight_rebuild_and_verify(self) -> None:
         self.assertEqual([step.step_id for step in MYSQL_REBUILD_STEPS], ["preflight", "rebuild", "verify"])
 
+    def test_verify_uses_a_private_client_file(self) -> None:
+        class Remote:
+            def __init__(self) -> None:
+                self.written: list[tuple[str, str]] = []
+                self.commands: list[str] = []
+
+            def write_text(self, path: str, content: str) -> None:
+                self.written.append((path, content))
+
+            def run(self, command: str, **kwargs) -> None:
+                del kwargs
+                self.commands.append(command)
+
+        remote = Remote()
+        self.workflow._verify_with_database_password(remote)
+        path, client_config = remote.written[0]
+        self.assertIn('password="secret"', client_config)
+        self.assertIn(f"chmod 600 {path}", remote.commands[0])
+        self.assertIn(f"--defaults-extra-file={path}", remote.commands[1])
+        self.assertNotIn(self.config.database.password, remote.commands[1])
+        self.assertIn(f"rm -f {path}", remote.commands[2])
+
     def test_preflight_command_is_a_complete_shell_script(self) -> None:
         command = self.workflow._preflight_command()
         self.assertTrue(command.rstrip().endswith('echo Source: http://$server/ukminstall'))
