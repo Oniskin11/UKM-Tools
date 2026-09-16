@@ -77,7 +77,8 @@ fail() { echo "Preflight failed: $1" >&2; exit 1; }
 RC=/usr/local/ukmclient/rc.ukm
 echo "Check: configuration $RC"
 test -r "$RC" || fail "cannot read $RC"
-. "$RC" || fail "cannot load $RC"
+# rc.ukm may execute terminal-specific commands; read only its server assignment.
+server=$(awk -F= '/^[[:space:]]*server[[:space:]]*=/ { print $2; exit }' "$RC" | tr -d '[:space:]"')
 test -n "${server:-}" || fail "server is not set in $RC"
 case "$server" in *[!0-9A-Za-z._:-]*) fail 'unsafe server value in rc.ukm';; esac
 echo "Check: required utilities"
