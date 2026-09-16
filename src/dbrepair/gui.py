@@ -136,21 +136,23 @@ class BaseTargetView:
 
     def _build_ui(self) -> None:
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(3, weight=1)
+        self.frame.rowconfigure(2, weight=1)
 
-        info_frame = ttk.LabelFrame(self.frame, text="Подключение", padding=12)
+        info_frame = ttk.LabelFrame(self.frame, text="Касса", padding=12)
         info_frame.grid(row=0, column=0, sticky="ew")
         info_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(info_frame, text="SSH/IP адрес").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(info_frame, text="Адрес", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
         host_entry = ttk.Entry(info_frame)
         host_entry.insert(0, self.host)
         host_entry.configure(state="readonly")
         host_entry.grid(row=0, column=1, sticky="ew")
 
-        ttk.Label(info_frame, text="Лог-файл").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(10, 0))
+        ttk.Label(info_frame, text="Файл журнала", style="Field.TLabel").grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0)
+        )
         ttk.Entry(info_frame, textvariable=self.log_path_var, state="readonly").grid(
-            row=1, column=1, sticky="ew", pady=(10, 0)
+            row=1, column=1, sticky="ew", pady=(8, 0)
         )
 
         controls_frame = ttk.Frame(self.frame, padding=(0, 12, 0, 12))
@@ -163,22 +165,23 @@ class BaseTargetView:
         actions_frame.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         actions_frame.columnconfigure(20, weight=1)
 
-        self.run_all_button = ttk.Button(actions_frame, text=self.run_all_text(), command=self.run_all)
+        self.run_all_button = ttk.Button(
+            actions_frame, text=self.run_all_text(), command=self.run_all, style="Accent.TButton"
+        )
         self.run_all_button.grid(row=0, column=0, padx=(0, 8))
         self.reset_button = ttk.Button(actions_frame, text="Сбросить статусы", command=self.reset_statuses)
         self.reset_button.grid(row=0, column=1, padx=(0, 8))
         self.cancel_button = ttk.Button(actions_frame, text="Отменить", command=self.cancel)
         self.cancel_button.grid(row=0, column=2, padx=(0, 8))
         next_col = self._extra_action_buttons(actions_frame, 3)
-        ttk.Label(actions_frame, textvariable=self.summary_var).grid(row=0, column=20, sticky="w", padx=(8, 0))
+        ttk.Label(actions_frame, textvariable=self.summary_var, style="Summary.TLabel").grid(
+            row=0, column=20, sticky="w", padx=(8, 0)
+        )
 
-        content = ttk.Frame(self.frame)
-        content.grid(row=3, column=0, sticky="nsew")
-        content.columnconfigure(0, weight=1)
-        content.rowconfigure(1, weight=1)
+        content = ttk.PanedWindow(self.frame, orient="vertical")
+        content.grid(row=2, column=0, sticky="nsew")
 
-        steps_frame = ttk.Frame(content, padding=(12, 12, 12, 0))
-        steps_frame.grid(row=0, column=0, sticky="ew")
+        steps_frame = ttk.LabelFrame(content, text="План операции", padding=10)
         steps_frame.columnconfigure(1, weight=1)
         steps_frame.columnconfigure(3, weight=1)
 
@@ -209,17 +212,36 @@ class BaseTargetView:
             self.status_labels[step.step_id] = status_label
             self.step_buttons[step.step_id] = button
 
-        log_frame = ttk.Frame(content, padding=(12, 12, 12, 12))
-        log_frame.grid(row=1, column=0, sticky="nsew")
+        log_frame = ttk.LabelFrame(content, text="Журнал выполнения", padding=10)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(1, weight=1)
 
-        ttk.Label(log_frame, text="Журнал выполнения").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.log_text = tk.Text(log_frame, wrap="word", height=10, font=("Consolas", 10), state="disabled")
+        ttk.Label(log_frame, text="Перетащите разделитель выше или ниже, чтобы изменить размер журнала.", style="Hint.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        self.log_text = tk.Text(
+            log_frame,
+            wrap="none",
+            height=10,
+            font=("Cascadia Mono", 10),
+            background="#152631",
+            foreground="#dcecf1",
+            insertbackground="#dcecf1",
+            selectbackground="#2f7285",
+            state="disabled",
+            relief="flat",
+            padx=8,
+            pady=6,
+        )
         self.log_text.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
-        self.log_text.configure(yscrollcommand=scrollbar.set)
+        x_scrollbar = ttk.Scrollbar(log_frame, orient="horizontal", command=self.log_text.xview)
+        x_scrollbar.grid(row=2, column=0, sticky="ew")
+        self.log_text.configure(yscrollcommand=scrollbar.set, xscrollcommand=x_scrollbar.set)
+
+        content.add(steps_frame, weight=2)
+        content.add(log_frame, weight=3)
 
     # --- Запуск/остановка -------------------------------------------------- #
 
@@ -421,14 +443,16 @@ class BasePanel:
             text="Адреса касс: по одному на строку, либо через запятую или точку с запятой.",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
-        self.hosts_text = tk.Text(hosts_frame, height=4, wrap="word", font=("Consolas", 10))
+        self.hosts_text = tk.Text(hosts_frame, height=3, wrap="word", font=("Cascadia Mono", 10), padx=8, pady=6)
         self.hosts_text.grid(row=1, column=0, sticky="ew")
 
         controls_frame = ttk.Frame(hosts_frame)
         controls_frame.grid(row=1, column=1, sticky="ns", padx=(8, 0))
         self._build_controls(controls_frame)
 
-        ttk.Label(parent, textvariable=self.overview_var).grid(row=1, column=0, sticky="w", padx=12, pady=(12, 8))
+        ttk.Label(parent, textvariable=self.overview_var, style="Summary.TLabel").grid(
+            row=1, column=0, sticky="w", padx=16, pady=(10, 8)
+        )
 
         self.notebook = ttk.Notebook(parent)
         self.notebook.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
@@ -983,10 +1007,12 @@ class PublishPanel:
 
     def _build_ui(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(1, weight=1)
+        parent.rowconfigure(0, weight=1)
 
-        form = ttk.LabelFrame(parent, text="Драйвер ККТ", padding=12)
-        form.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 0))
+        content = ttk.PanedWindow(parent, orient="vertical")
+        content.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+
+        form = ttk.LabelFrame(content, text="Драйвер ККТ", padding=12)
         form.columnconfigure(1, weight=1)
 
         ttk.Label(form, text="Файл (.zip) или папка дистрибутива").grid(row=0, column=0, sticky="w", padx=(0, 8))
@@ -1005,20 +1031,41 @@ class PublishPanel:
         actions = ttk.Frame(form)
         actions.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         actions.columnconfigure(1, weight=1)
-        self.publish_button = ttk.Button(actions, text="Опубликовать на веб-сервер", command=self.publish)
+        self.publish_button = ttk.Button(
+            actions, text="Опубликовать на веб-сервер", command=self.publish, style="Accent.TButton"
+        )
         self.publish_button.grid(row=0, column=0, padx=(0, 8))
-        ttk.Label(actions, textvariable=self.summary_var).grid(row=0, column=1, sticky="w")
+        ttk.Label(actions, textvariable=self.summary_var, style="Summary.TLabel").grid(row=0, column=1, sticky="w")
 
-        log_frame = ttk.Frame(parent, padding=(12, 12, 12, 12))
-        log_frame.grid(row=1, column=0, sticky="nsew")
+        log_frame = ttk.LabelFrame(content, text="Журнал публикации", padding=10)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(1, weight=1)
-        ttk.Label(log_frame, text="Журнал публикации").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.log_text = tk.Text(log_frame, wrap="word", height=14, font=("Consolas", 10), state="disabled")
+        ttk.Label(log_frame, text="Перетащите разделитель выше или ниже, чтобы изменить размер журнала.", style="Hint.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        self.log_text = tk.Text(
+            log_frame,
+            wrap="none",
+            height=14,
+            font=("Cascadia Mono", 10),
+            background="#152631",
+            foreground="#dcecf1",
+            insertbackground="#dcecf1",
+            selectbackground="#2f7285",
+            state="disabled",
+            relief="flat",
+            padx=8,
+            pady=6,
+        )
         self.log_text.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
-        self.log_text.configure(yscrollcommand=scrollbar.set)
+        x_scrollbar = ttk.Scrollbar(log_frame, orient="horizontal", command=self.log_text.xview)
+        x_scrollbar.grid(row=2, column=0, sticky="ew")
+        self.log_text.configure(yscrollcommand=scrollbar.set, xscrollcommand=x_scrollbar.set)
+
+        content.add(form, weight=1)
+        content.add(log_frame, weight=3)
 
     def _browse_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -1415,11 +1462,27 @@ class DbRepairGui:
 
     def _build_styles(self) -> None:
         style = ttk.Style()
-        style.configure("Pending.TLabel", foreground="#5c6770")
-        style.configure("Running.TLabel", foreground="#005f99")
-        style.configure("Success.TLabel", foreground="#20603d")
-        style.configure("Error.TLabel", foreground="#9f2a2a")
-        style.configure("Cancelled.TLabel", foreground="#a55d00")
+        style.theme_use("clam")
+        style.configure(".", font=("Segoe UI", 10), background="#f4f7fa", foreground="#22313f")
+        style.configure("TFrame", background="#f4f7fa")
+        style.configure("TLabel", background="#f4f7fa")
+        style.configure("TLabelframe", background="#f4f7fa", bordercolor="#cbd5df", relief="solid")
+        style.configure("TLabelframe.Label", background="#f4f7fa", foreground="#35536b", font=("Segoe UI Semibold", 10))
+        style.configure("TButton", padding=(10, 5))
+        style.configure("Accent.TButton", background="#176b87", foreground="#ffffff", padding=(12, 6))
+        style.map(
+            "Accent.TButton",
+            background=[("disabled", "#9baab5"), ("active", "#0e5871")],
+            foreground=[("disabled", "#edf2f5")],
+        )
+        style.configure("Field.TLabel", foreground="#597083")
+        style.configure("Hint.TLabel", foreground="#647b8c", font=("Segoe UI", 9))
+        style.configure("Summary.TLabel", foreground="#175b73", font=("Segoe UI Semibold", 10))
+        style.configure("Pending.TLabel", foreground="#667583")
+        style.configure("Running.TLabel", foreground="#126e8a", font=("Segoe UI Semibold", 10))
+        style.configure("Success.TLabel", foreground="#24734d", font=("Segoe UI Semibold", 10))
+        style.configure("Error.TLabel", foreground="#ae3838", font=("Segoe UI Semibold", 10))
+        style.configure("Cancelled.TLabel", foreground="#a35c10", font=("Segoe UI Semibold", 10))
 
     def _build_ui(self) -> None:
         root_frame = ttk.Frame(self.root, padding=12)
@@ -1429,7 +1492,7 @@ class DbRepairGui:
         root_frame.columnconfigure(0, weight=1)
         root_frame.rowconfigure(1, weight=1)
 
-        config_frame = ttk.LabelFrame(root_frame, text="Конфигурация", padding=12)
+        config_frame = ttk.LabelFrame(root_frame, text="Рабочая конфигурация", padding=12)
         config_frame.grid(row=0, column=0, sticky="ew")
         config_frame.columnconfigure(1, weight=1)
 
