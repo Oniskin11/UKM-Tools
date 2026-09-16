@@ -65,7 +65,9 @@ class MysqlRebuildWorkflow:
         remote.write_text(path, client_config)
         try:
             remote.run(f"chmod 600 {shlex.quote(path)}", timeout=30)
-            remote.run(self._verify_command(path), timeout=90)
+            # The POS login profile uses terminal commands before the command
+            # body runs. A PTY supplies TERM during that profile startup.
+            remote.run(self._verify_command(path), timeout=90, get_pty=True)
         finally:
             remote.run(f"rm -f {shlex.quote(path)}", check=False)
 

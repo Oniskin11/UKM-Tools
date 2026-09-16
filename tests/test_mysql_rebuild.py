@@ -47,25 +47,25 @@ class MysqlRebuildTests(unittest.TestCase):
         class Remote:
             def __init__(self) -> None:
                 self.written: list[tuple[str, str]] = []
-                self.commands: list[str] = []
+                self.commands: list[tuple[str, dict]] = []
 
             def write_text(self, path: str, content: str) -> None:
                 self.written.append((path, content))
 
             def run(self, command: str, **kwargs) -> None:
-                del kwargs
-                self.commands.append(command)
+                self.commands.append((command, kwargs))
 
         remote = Remote()
         self.workflow._verify_with_database_password(remote)
         path, client_config = remote.written[0]
         self.assertIn('password="secret"', client_config)
-        self.assertIn(f"chmod 600 {path}", remote.commands[0])
-        self.assertIn(f"--defaults-extra-file={path}", remote.commands[1])
-        self.assertIn("TERM=linux /etc/init.d/ukmclient start", remote.commands[1])
-        self.assertIn("pgrep -f '/usr/local/ukmclient/ukmstart.sh'", remote.commands[1])
-        self.assertNotIn(self.config.database.password, remote.commands[1])
-        self.assertIn(f"rm -f {path}", remote.commands[2])
+        self.assertIn(f"chmod 600 {path}", remote.commands[0][0])
+        self.assertIn(f"--defaults-extra-file={path}", remote.commands[1][0])
+        self.assertIn("TERM=linux /etc/init.d/ukmclient start", remote.commands[1][0])
+        self.assertIn("pgrep -f '/usr/local/ukmclient/ukmstart.sh'", remote.commands[1][0])
+        self.assertTrue(remote.commands[1][1]["get_pty"])
+        self.assertNotIn(self.config.database.password, remote.commands[1][0])
+        self.assertIn(f"rm -f {path}", remote.commands[2][0])
 
     def test_preflight_command_is_a_complete_shell_script(self) -> None:
         command = self.workflow._preflight_command()
