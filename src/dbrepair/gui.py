@@ -178,7 +178,7 @@ class BaseTargetView:
             row=0, column=20, sticky="w", padx=(8, 0)
         )
 
-        content = ttk.PanedWindow(self.frame, orient="vertical")
+        content = ttk.PanedWindow(self.frame, orient="horizontal")
         content.grid(row=2, column=0, sticky="nsew")
 
         steps_frame = ttk.LabelFrame(content, text="План операции", padding=10)
@@ -216,7 +216,7 @@ class BaseTargetView:
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(1, weight=1)
 
-        ttk.Label(log_frame, text="Перетащите разделитель выше или ниже, чтобы изменить размер журнала.", style="Hint.TLabel").grid(
+        ttk.Label(log_frame, text="Журнал виден постоянно. Потяните разделитель, чтобы изменить его ширину.", style="Hint.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 8)
         )
         self.log_text = tk.Text(
@@ -240,8 +240,8 @@ class BaseTargetView:
         x_scrollbar.grid(row=2, column=0, sticky="ew")
         self.log_text.configure(yscrollcommand=scrollbar.set, xscrollcommand=x_scrollbar.set)
 
-        content.add(steps_frame, weight=2)
-        content.add(log_frame, weight=3)
+        content.add(steps_frame, weight=3)
+        content.add(log_frame, weight=2)
 
     # --- Запуск/остановка -------------------------------------------------- #
 
