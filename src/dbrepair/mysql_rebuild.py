@@ -75,12 +75,9 @@ FLUSH PRIVILEGES;
         return r"""set -u
 fail() { echo "Preflight failed: $1" >&2; exit 1; }
 RC=/usr/local/ukmclient/rc.ukm
-echo "Check: configuration $RC"
-test -r "$RC" || fail "cannot read $RC"
-# rc.ukm may execute terminal-specific commands; read only its server assignment.
-server=$(awk -F= '/^[[:space:]]*server[[:space:]]*=/ { print $2; exit }' "$RC" | tr -d '[:space:]"')
-test -n "${server:-}" || fail "server is not set in $RC"
-case "$server" in *[!0-9A-Za-z._:-]*) fail 'unsafe server value in rc.ukm';; esac
+""" + self._source_server_resolver() + r"""
+echo "Check: source server"
+resolve_source_server || fail 'cannot determine source server'
 echo "Check: required utilities"
 command -v wget >/dev/null 2>&1 || fail 'wget is unavailable'
 command -v tar >/dev/null 2>&1 || fail 'tar is unavailable'
@@ -99,6 +96,8 @@ echo Source: http://$server/ukminstall"""
 MYSQL_DIR=/usr/local/mysql
 VAR_DIR=/usr/local/mysql/var
 RC=/usr/local/ukmclient/rc.ukm
+fail() { echo "MySQL rebuild failed: $1" >&2; return 1; }
+""" + self._source_server_resolver() + r"""
 WORK=$(mktemp -d /tmp/dbrepair-mysql-rebuild.XXXXXX)
 ukm_stopped=0
 mysql_stopped=0
@@ -110,10 +109,7 @@ cleanup() {
     exit "$rc"
 }
 trap cleanup EXIT HUP INT TERM
-test -r "$RC"
-. "$RC"
-test -n "${server:-}"
-case "$server" in *[!0-9A-Za-z._:-]*) echo 'Unsafe server value in rc.ukm' >&2; exit 2;; esac
+resolve_source_server || { fail 'cannot determine source server'; exit 1; }
 cd "$WORK"
 wget -q --timeout=30 --tries=2 -O ukmcli-build.tgz "http://$server/ukminstall/ukmcli-build.tgz"
 wget -q --timeout=30 --tries=2 -O ukm-root.tar.gz "http://$server/ukminstall/ukm-root.tar.gz"
@@ -144,6 +140,42 @@ mysqladmin ping --silent >/dev/null 2>&1
 mysql -e 'CREATE DATABASE IF NOT EXISTS ukmclient CHARACTER SET utf8 COLLATE utf8_general_ci'
 find "$WORK" -type f -name '*.sql' -print | LC_ALL=C sort -r | while IFS= read -r sql; do mysql ukmclient < "$sql"; done
 echo "Previous datadir kept at $BACKUP"
+"""
+
+    @staticmethod
+    def _source_server_resolver() -> str:
+        """Return POS shell code that finds the UKM package source without executing rc.ukm."""
+        return r"""
+resolve_source_server() {
+    server=
+    source_method=
+    # Old POS images can contain a plain server= line.  Do not source rc.ukm:
+    # it may execute terminal-specific commands in a non-interactive shell.
+    if test -r "$RC"; then
+        server=$(awk -F= '/^[[:space:]]*server[[:space:]]*=/ { print $2; exit }' "$RC" | tr -d '[:space:]"')
+        if test -n "${server:-}"; then source_method="rc.ukm"; fi
+    fi
+    # Modern POS images do not store the update server in rc.ukm.  The UKM
+    # server has an established connection to the local MySQL port, so use its
+    # single non-loopback peer as the package source.
+    if test -z "${server:-}"; then
+        command -v netstat >/dev/null 2>&1 || { echo 'netstat is unavailable' >&2; return 1; }
+        peers=$(netstat -tn 2>/dev/null | awk '$6 == "ESTABLISHED" && $4 ~ /(:3306|:mysql)$/ { peer=$5; sub(/:[^:]*$/, "", peer); if (peer !~ /^(127\.|localhost|::1)/) print peer }' | sort -u)
+        peer_count=$(printf '%s\n' "$peers" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+        if test "$peer_count" -eq 0; then
+            echo 'no established remote MySQL peer was found by netstat' >&2
+            return 1
+        fi
+        if test "$peer_count" -ne 1; then
+            echo "multiple remote MySQL peers found: $peers" >&2
+            return 1
+        fi
+        server=$peers
+        source_method='netstat MySQL peer'
+    fi
+    case "$server" in *[!0-9A-Za-z._:-]*) echo "unsafe source server value: $server" >&2; return 1;; esac
+    echo "Source server: $server ($source_method)"
+}
 """
 
     def _verify_command(self) -> str:

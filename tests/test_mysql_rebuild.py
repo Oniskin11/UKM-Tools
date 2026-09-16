@@ -37,6 +37,8 @@ class MysqlRebuildTests(unittest.TestCase):
         self.assertIn('/etc/init.d/mysql start || true', command)
         self.assertIn('/etc/init.d/ukmclient start || true', command)
         self.assertIn('wget -q --timeout=30 --tries=2', command)
+        self.assertNotIn('. "$RC"', command)
+        self.assertIn('resolve_source_server || { fail', command)
 
     def test_plan_has_preflight_rebuild_and_verify(self) -> None:
         self.assertEqual([step.step_id for step in MYSQL_REBUILD_STEPS], ["preflight", "rebuild", "verify"])
@@ -45,9 +47,11 @@ class MysqlRebuildTests(unittest.TestCase):
         command = self.workflow._preflight_command()
         self.assertTrue(command.rstrip().endswith('echo Source: http://$server/ukminstall'))
         self.assertIn('fail() { echo "Preflight failed: $1" >&2; exit 1; }', command)
-        self.assertIn('cannot read $RC', command)
         self.assertIn('cannot download ukm-root.tar.gz from $server', command)
         self.assertIn("awk -F=", command)
+        self.assertIn("netstat -tn", command)
+        self.assertIn('no established remote MySQL peer was found by netstat', command)
+        self.assertIn('multiple remote MySQL peers found', command)
         self.assertNotIn('. "$RC"', command)
 
     def test_grants_are_sent_as_a_temporary_file(self) -> None:
