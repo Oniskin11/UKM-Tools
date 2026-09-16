@@ -37,7 +37,7 @@ class MysqlRebuildTests(unittest.TestCase):
         self.assertIn('/etc/init.d/mysql start || true', command)
         self.assertIn('/etc/init.d/ukmclient start || true', command)
         self.assertIn('wget -q --timeout=30 --tries=2', command)
-        self.assertIn("find \"$WORK\" -type d -path '*/usr/local/mysql/var' -print | sed -n '1p'", command)
+        self.assertIn("find \"$WORK\" -type d -path '*/usr/local/mysql*/var' -print | sed -n '1p'", command)
         self.assertNotIn("-print -quit", command)
         self.assertNotIn('. "$RC"', command)
         self.assertIn('resolve_source_server || { fail', command)

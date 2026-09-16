@@ -143,8 +143,9 @@ if tar tzf ukmcli-build.tgz | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then ech
 if tar tzf ukm-root.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then echo 'Unsafe root archive' >&2; exit 2; fi
 tar xzf ukmcli-build.tgz
 tar xzf ukm-root.tar.gz
+# The package ships a versioned directory such as mysql-5.0.67-ukm.
 # BusyBox find on POS does not support GNU find's -quit predicate.
-NEW_VAR=$(find "$WORK" -type d -path '*/usr/local/mysql/var' -print | sed -n '1p')
+NEW_VAR=$(find "$WORK" -type d -path '*/usr/local/mysql*/var' -print | sed -n '1p')
 test -n "$NEW_VAR"
 test -f "$NEW_VAR/ibdata1" -o -d "$NEW_VAR/mysql"
 /etc/init.d/ukmclient stop
