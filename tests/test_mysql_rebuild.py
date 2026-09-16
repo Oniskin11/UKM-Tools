@@ -47,6 +47,8 @@ class MysqlRebuildTests(unittest.TestCase):
         self.assertIn('fail() { echo "Preflight failed: $1" >&2; exit 1; }', command)
         self.assertIn('cannot read $RC', command)
         self.assertIn('cannot download ukm-root.tar.gz from $server', command)
+        self.assertIn("awk -F=", command)
+        self.assertNotIn('. "$RC"', command)
 
     def test_grants_are_sent_as_a_temporary_file(self) -> None:
         class Remote:
