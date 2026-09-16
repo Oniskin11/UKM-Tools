@@ -47,7 +47,12 @@ class MysqlRebuildWorkflow:
                             "preflight": self._preflight_command,
                             "rebuild": self._rebuild_command,
                         }[step.step_id]()
-                        remote.run(command, timeout=900 if step.step_id == "rebuild" else 90)
+                        remote.run(
+                            command,
+                            timeout=900 if step.step_id == "rebuild" else 90,
+                            # The old POS login profile uses terminal commands.
+                            get_pty=step.step_id == "rebuild",
+                        )
                     if step.step_id == "rebuild":
                         self._apply_standard_grants(remote)
                 except Exception as exc:
@@ -138,7 +143,8 @@ if tar tzf ukmcli-build.tgz | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then ech
 if tar tzf ukm-root.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then echo 'Unsafe root archive' >&2; exit 2; fi
 tar xzf ukmcli-build.tgz
 tar xzf ukm-root.tar.gz
-NEW_VAR=$(find "$WORK" -type d -path '*/usr/local/mysql/var' -print -quit)
+# BusyBox find on POS does not support GNU find's -quit predicate.
+NEW_VAR=$(find "$WORK" -type d -path '*/usr/local/mysql/var' -print | sed -n '1p')
 test -n "$NEW_VAR"
 test -f "$NEW_VAR/ibdata1" -o -d "$NEW_VAR/mysql"
 /etc/init.d/ukmclient stop
