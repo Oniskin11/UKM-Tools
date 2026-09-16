@@ -72,19 +72,25 @@ FLUSH PRIVILEGES;
             remote.run(f"rm -f {path}", check=False)
 
     def _preflight_command(self) -> str:
-        return r"""set -eu
+        return r"""set -u
+fail() { echo "Preflight failed: $1" >&2; exit 1; }
 RC=/usr/local/ukmclient/rc.ukm
-test -r "$RC"
-. "$RC"
-test -n "${server:-}"
-case "$server" in *[!0-9A-Za-z._:-]*) echo 'Unsafe server value in rc.ukm' >&2; exit 2;; esac
-command -v wget >/dev/null 2>&1
-command -v tar >/dev/null 2>&1
-command -v mysql >/dev/null 2>&1
-test -d /usr/local/mysql
-test -d /usr/local/mysql/var
-wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukmcli-build.tgz"
-wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukm-root.tar.gz"
+echo "Check: configuration $RC"
+test -r "$RC" || fail "cannot read $RC"
+. "$RC" || fail "cannot load $RC"
+test -n "${server:-}" || fail "server is not set in $RC"
+case "$server" in *[!0-9A-Za-z._:-]*) fail 'unsafe server value in rc.ukm';; esac
+echo "Check: required utilities"
+command -v wget >/dev/null 2>&1 || fail 'wget is unavailable'
+command -v tar >/dev/null 2>&1 || fail 'tar is unavailable'
+command -v mysql >/dev/null 2>&1 || fail 'mysql is unavailable'
+echo "Check: MySQL datadir"
+test -d /usr/local/mysql || fail 'directory /usr/local/mysql is absent'
+test -d /usr/local/mysql/var || fail 'directory /usr/local/mysql/var is absent'
+echo "Check: ukmcli-build.tgz"
+wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukmcli-build.tgz" || fail "cannot download ukmcli-build.tgz from $server"
+echo "Check: ukm-root.tar.gz"
+wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukm-root.tar.gz" || fail "cannot download ukm-root.tar.gz from $server"
 echo Source: http://$server/ukminstall"""
 
     def _rebuild_command(self) -> str:
