@@ -24,9 +24,11 @@ class MysqlRebuildTests(unittest.TestCase):
         )
         self.workflow = MysqlRebuildWorkflow(self.config, Logger())
 
-    def test_requires_full_ordered_plan(self) -> None:
+    def test_rejects_unknown_or_empty_plan(self) -> None:
         with self.assertRaises(WorkflowError):
-            self.workflow.run_steps(["preflight"])
+            self.workflow.run_steps([])
+        with self.assertRaises(WorkflowError):
+            self.workflow.run_steps(["unknown"])
 
     def test_rebuild_keeps_previous_datadir_and_restores_services(self) -> None:
         command = self.workflow._rebuild_command()

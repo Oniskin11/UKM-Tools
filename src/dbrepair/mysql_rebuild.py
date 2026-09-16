@@ -27,12 +27,14 @@ class MysqlRebuildWorkflow:
         self.cancel_event = cancel_event
 
     def run_steps(self, step_ids: Sequence[str], *, progress: ProgressCallback | None = None) -> None:
-        required = [step.step_id for step in MYSQL_REBUILD_STEPS]
-        if list(step_ids) != required:
-            raise WorkflowError("Пересборка MySQL запускается только полным планом из трёх шагов.")
+        known_ids = {step.step_id for step in MYSQL_REBUILD_STEPS}
+        unknown = set(step_ids) - known_ids
+        if not step_ids or unknown:
+            raise WorkflowError(f"Unknown MySQL rebuild steps: {', '.join(sorted(unknown)) or 'empty plan'}.")
 
         with RemoteClient(self.config.connection, self.logger, cancel_event=self.cancel_event) as remote:
-            for step in MYSQL_REBUILD_STEPS:
+            selected = [step for step in MYSQL_REBUILD_STEPS if step.step_id in step_ids]
+            for step in selected:
                 self.logger.info("Step %s: %s", step.number, step.title)
                 if progress:
                     progress(step, "running", None)

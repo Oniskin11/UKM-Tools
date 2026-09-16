@@ -669,14 +669,21 @@ class MysqlRebuildTargetView(BaseTargetView):
         return "Пересобрать MySQL"
 
     def ready_text(self) -> str:
-        return "Готово к пересборке чистой MySQL. Данные текущей базы будут заменены."
+        return "Можно проверить источник, пересобрать MySQL или проверить результат."
 
     def running_text(self) -> str:
         return "Пересборка MySQL..."
 
     def run_step(self, step_id: str) -> bool:
-        self.summary_var.set("Отдельные шаги отключены: пересборка выполняется только полным планом.")
-        return False
+        if step_id == "rebuild" and not messagebox.askyesno(
+            "Подтверждение пересборки MySQL",
+            f"На кассе {self.host} текущий datadir MySQL будет заменён чистым. "
+            "Прежний каталог будет сохранён как var_badN. Продолжить?",
+            icon="warning",
+            parent=self.frame.winfo_toplevel(),
+        ):
+            return False
+        return self.start_worker([step_id], reset=False)
 
     def run_all(self) -> bool:
         if not messagebox.askyesno(
