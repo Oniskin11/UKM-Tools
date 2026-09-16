@@ -41,6 +41,10 @@ class MysqlRebuildTests(unittest.TestCase):
     def test_plan_has_preflight_rebuild_and_verify(self) -> None:
         self.assertEqual([step.step_id for step in MYSQL_REBUILD_STEPS], ["preflight", "rebuild", "verify"])
 
+    def test_preflight_command_is_a_complete_shell_script(self) -> None:
+        command = self.workflow._preflight_command()
+        self.assertTrue(command.rstrip().endswith('echo Source: http://$server/ukminstall'))
+
     def test_grants_are_sent_as_a_temporary_file(self) -> None:
         class Remote:
             def __init__(self) -> None:

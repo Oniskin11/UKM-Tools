@@ -85,7 +85,7 @@ test -d /usr/local/mysql
 test -d /usr/local/mysql/var
 wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukmcli-build.tgz"
 wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukm-root.tar.gz"
-echo "Source: http://$server/ukminstall"""
+echo Source: http://$server/ukminstall"""
 
     def _rebuild_command(self) -> str:
         return r"""set -eu
