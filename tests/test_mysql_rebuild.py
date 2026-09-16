@@ -44,6 +44,9 @@ class MysqlRebuildTests(unittest.TestCase):
     def test_preflight_command_is_a_complete_shell_script(self) -> None:
         command = self.workflow._preflight_command()
         self.assertTrue(command.rstrip().endswith('echo Source: http://$server/ukminstall'))
+        self.assertIn('fail() { echo "Preflight failed: $1" >&2; exit 1; }', command)
+        self.assertIn('cannot read $RC', command)
+        self.assertIn('cannot download ukm-root.tar.gz from $server', command)
 
     def test_grants_are_sent_as_a_temporary_file(self) -> None:
         class Remote:
