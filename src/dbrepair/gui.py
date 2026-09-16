@@ -221,7 +221,7 @@ class BaseTargetView:
         )
         self.log_text = tk.Text(
             log_frame,
-            wrap="none",
+            wrap="word",
             height=10,
             font=("Cascadia Mono", 10),
             background="#152631",
@@ -236,9 +236,7 @@ class BaseTargetView:
         self.log_text.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
-        x_scrollbar = ttk.Scrollbar(log_frame, orient="horizontal", command=self.log_text.xview)
-        x_scrollbar.grid(row=2, column=0, sticky="ew")
-        self.log_text.configure(yscrollcommand=scrollbar.set, xscrollcommand=x_scrollbar.set)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
 
         content.add(steps_frame, weight=3)
         content.add(log_frame, weight=2)
@@ -1045,7 +1043,7 @@ class PublishPanel:
         )
         self.log_text = tk.Text(
             log_frame,
-            wrap="none",
+            wrap="word",
             height=14,
             font=("Cascadia Mono", 10),
             background="#152631",
@@ -1060,9 +1058,7 @@ class PublishPanel:
         self.log_text.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
-        x_scrollbar = ttk.Scrollbar(log_frame, orient="horizontal", command=self.log_text.xview)
-        x_scrollbar.grid(row=2, column=0, sticky="ew")
-        self.log_text.configure(yscrollcommand=scrollbar.set, xscrollcommand=x_scrollbar.set)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
 
         content.add(form, weight=1)
         content.add(log_frame, weight=3)
