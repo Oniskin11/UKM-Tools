@@ -138,21 +138,18 @@ class BaseTargetView:
         self.frame.columnconfigure(0, weight=1)
         self.frame.rowconfigure(2, weight=1)
 
-        info_frame = ttk.LabelFrame(self.frame, text="Касса", padding=12)
-        info_frame.grid(row=0, column=0, sticky="ew")
-        info_frame.columnconfigure(1, weight=1)
+        target_header = ttk.Frame(self.frame, padding=(4, 0, 4, 6))
+        target_header.grid(row=0, column=0, sticky="ew")
+        target_header.columnconfigure(1, weight=1)
 
-        ttk.Label(info_frame, text="Адрес", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        host_entry = ttk.Entry(info_frame)
-        host_entry.insert(0, self.host)
-        host_entry.configure(state="readonly")
-        host_entry.grid(row=0, column=1, sticky="ew")
-
-        ttk.Label(info_frame, text="Файл журнала", style="Field.TLabel").grid(
-            row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0)
+        ttk.Label(target_header, text=f"Касса {self.host}", style="Target.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        ttk.Entry(info_frame, textvariable=self.log_path_var, state="readonly").grid(
-            row=1, column=1, sticky="ew", pady=(8, 0)
+        ttk.Label(target_header, text="Журнал", style="Field.TLabel").grid(
+            row=1, column=0, sticky="w", padx=(0, 8)
+        )
+        ttk.Entry(target_header, textvariable=self.log_path_var, state="readonly").grid(
+            row=1, column=1, sticky="ew"
         )
 
         controls_frame = ttk.Frame(self.frame, padding=(0, 12, 0, 12))
@@ -163,8 +160,6 @@ class BaseTargetView:
 
         actions_frame = ttk.Frame(controls_frame)
         actions_frame.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        actions_frame.columnconfigure(20, weight=1)
-
         self.run_all_button = ttk.Button(
             actions_frame, text=self.run_all_text(), command=self.run_all, style="Accent.TButton"
         )
@@ -174,8 +169,9 @@ class BaseTargetView:
         self.cancel_button = ttk.Button(actions_frame, text="Отменить", command=self.cancel)
         self.cancel_button.grid(row=0, column=2, padx=(0, 8))
         next_col = self._extra_action_buttons(actions_frame, 3)
+        actions_frame.columnconfigure(next_col, weight=1)
         ttk.Label(actions_frame, textvariable=self.summary_var, style="Summary.TLabel").grid(
-            row=0, column=20, sticky="w", padx=(8, 0)
+            row=0, column=next_col, sticky="w", padx=(8, 0)
         )
 
         content = ttk.PanedWindow(self.frame, orient="horizontal")
@@ -187,7 +183,9 @@ class BaseTargetView:
 
         headers = ("Шаг", "Действие", "Статус", "Комментарий", "")
         for column, title in enumerate(headers):
-            ttk.Label(steps_frame, text=title).grid(row=0, column=column, sticky="w", padx=(0, 8), pady=(0, 8))
+            ttk.Label(steps_frame, text=title, style="StepHeader.TLabel").grid(
+                row=0, column=column, sticky="w", padx=(0, 8), pady=(0, 8)
+            )
 
         for index, step in enumerate(self.steps(), start=1):
             ttk.Label(steps_frame, text=step.number).grid(row=index, column=0, sticky="nw", padx=(0, 8), pady=4)
@@ -204,6 +202,7 @@ class BaseTargetView:
                 steps_frame,
                 text="Выполнить",
                 command=lambda step_id=step.step_id: self.run_step(step_id),
+                style="Step.TButton",
             )
             button.grid(row=index, column=4, sticky="e", pady=4)
 
@@ -216,7 +215,7 @@ class BaseTargetView:
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(1, weight=1)
 
-        ttk.Label(log_frame, text="Журнал виден постоянно. Потяните разделитель, чтобы изменить его ширину.", style="Hint.TLabel").grid(
+        ttk.Label(log_frame, text="Ход выполнения и сообщения об ошибках", style="Hint.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 8)
         )
         self.log_text = tk.Text(
@@ -432,8 +431,8 @@ class BasePanel:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(2, weight=1)
 
-        hosts_frame = ttk.LabelFrame(parent, text="Кассы", padding=12)
-        hosts_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 0))
+        hosts_frame = ttk.LabelFrame(parent, text="Кассы", padding=10)
+        hosts_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 0))
         hosts_frame.columnconfigure(0, weight=1)
 
         ttk.Label(
@@ -441,11 +440,11 @@ class BasePanel:
             text="Адреса касс: по одному на строку, либо через запятую или точку с запятой.",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
-        self.hosts_text = tk.Text(hosts_frame, height=3, wrap="word", font=("Cascadia Mono", 10), padx=8, pady=6)
-        self.hosts_text.grid(row=1, column=0, sticky="ew")
+        self.hosts_text = tk.Text(hosts_frame, height=2, wrap="word", font=("Cascadia Mono", 10), padx=8, pady=6)
+        self.hosts_text.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         controls_frame = ttk.Frame(hosts_frame)
-        controls_frame.grid(row=1, column=1, sticky="ns", padx=(8, 0))
+        controls_frame.grid(row=2, column=0, columnspan=2, sticky="e", pady=(8, 0))
         self._build_controls(controls_frame)
 
         ttk.Label(parent, textvariable=self.overview_var, style="Summary.TLabel").grid(
@@ -638,16 +637,16 @@ class DbRepairPanel(BasePanel):
 
     def _build_controls(self, controls_frame: ttk.Frame) -> None:
         ttk.Button(controls_frame, text="Обновить список", command=self._apply_hosts).grid(
-            row=0, column=0, sticky="ew", pady=(0, 8)
+            row=0, column=0, padx=(0, 8)
         )
-        ttk.Button(controls_frame, text="Запустить все кассы", command=self._run_all_targets).grid(
-            row=1, column=0, sticky="ew", pady=(0, 8)
+        ttk.Button(controls_frame, text="Запустить все кассы", command=self._run_all_targets, style="Accent.TButton").grid(
+            row=0, column=1, padx=(0, 8)
         )
         ttk.Button(controls_frame, text="Отменить все", command=self._cancel_all_targets).grid(
-            row=2, column=0, sticky="ew", pady=(0, 8)
+            row=0, column=2, padx=(0, 8)
         )
         ttk.Button(controls_frame, text="Очистить список", command=self._clear_hosts).grid(
-            row=3, column=0, sticky="ew"
+            row=0, column=3
         )
 
 
@@ -878,19 +877,19 @@ class TsPiotPanel(BasePanel):
 
     def _build_controls(self, controls_frame: ttk.Frame) -> None:
         ttk.Button(controls_frame, text="Обновить список", command=self._apply_hosts).grid(
-            row=0, column=0, sticky="ew", pady=(0, 8)
+            row=0, column=0, padx=(0, 8)
         )
-        ttk.Button(controls_frame, text="Установить на все", command=self._run_all_targets).grid(
-            row=1, column=0, sticky="ew", pady=(0, 8)
+        ttk.Button(controls_frame, text="Установить на все", command=self._run_all_targets, style="Accent.TButton").grid(
+            row=0, column=1, padx=(0, 8)
         )
         ttk.Button(controls_frame, text="Отменить все", command=self._cancel_all_targets).grid(
-            row=2, column=0, sticky="ew", pady=(0, 8)
+            row=0, column=2, padx=(0, 8)
         )
         ttk.Button(controls_frame, text="Перезагрузить все", command=self._reboot_all_targets).grid(
-            row=3, column=0, sticky="ew", pady=(0, 8)
+            row=0, column=3, padx=(0, 8)
         )
         ttk.Button(controls_frame, text="Очистить список", command=self._clear_hosts).grid(
-            row=4, column=0, sticky="ew"
+            row=0, column=4
         )
 
     def _reboot_all_targets(self) -> None:
@@ -962,16 +961,18 @@ class KktTimePanel(BasePanel):
 
     def _build_controls(self, controls_frame: ttk.Frame) -> None:
         ttk.Button(controls_frame, text="Обновить список", command=self._apply_hosts).grid(
-            row=0, column=0, sticky="ew", pady=(0, 8)
+            row=0, column=0, padx=(0, 8)
         )
-        ttk.Button(controls_frame, text="Синхронизировать все", command=self._run_all_targets).grid(
-            row=1, column=0, sticky="ew", pady=(0, 8)
+        ttk.Button(
+            controls_frame, text="Синхронизировать все", command=self._run_all_targets, style="Accent.TButton"
+        ).grid(
+            row=0, column=1, padx=(0, 8)
         )
         ttk.Button(controls_frame, text="Отменить все", command=self._cancel_all_targets).grid(
-            row=2, column=0, sticky="ew", pady=(0, 8)
+            row=0, column=2, padx=(0, 8)
         )
         ttk.Button(controls_frame, text="Очистить список", command=self._clear_hosts).grid(
-            row=3, column=0, sticky="ew"
+            row=0, column=3
         )
 
 
@@ -1465,6 +1466,7 @@ class DbRepairGui:
         style.configure("TLabelframe", background="#f4f7fa", bordercolor="#cbd5df", relief="solid")
         style.configure("TLabelframe.Label", background="#f4f7fa", foreground="#35536b", font=("Segoe UI Semibold", 10))
         style.configure("TButton", padding=(10, 5))
+        style.configure("Step.TButton", padding=(8, 3))
         style.configure("Accent.TButton", background="#176b87", foreground="#ffffff", padding=(12, 6))
         style.map(
             "Accent.TButton",
@@ -1472,6 +1474,8 @@ class DbRepairGui:
             foreground=[("disabled", "#edf2f5")],
         )
         style.configure("Field.TLabel", foreground="#597083")
+        style.configure("Target.TLabel", foreground="#183f55", font=("Segoe UI Semibold", 13))
+        style.configure("StepHeader.TLabel", foreground="#35536b", font=("Segoe UI Semibold", 9))
         style.configure("Hint.TLabel", foreground="#647b8c", font=("Segoe UI", 9))
         style.configure("Summary.TLabel", foreground="#175b73", font=("Segoe UI Semibold", 10))
         style.configure("Pending.TLabel", foreground="#667583")
