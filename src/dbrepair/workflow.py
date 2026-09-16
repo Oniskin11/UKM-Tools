@@ -24,6 +24,7 @@ REMOTE_STATE_TIMEOUT_SECONDS = 60
 LOCAL_STATE_TIMEOUT_SECONDS = 15
 UKMCLIENT_START_TIMEOUT_SECONDS = 60
 UKMCLIENT_STOP_TIMEOUT_SECONDS = 60
+UKMCLIENT_START_SCRIPT_PATTERN = r"(^|/)ukmstart\.sh([[:space:]]|$)"
 
 
 class WorkflowError(RuntimeError):
@@ -499,7 +500,7 @@ class DbRepairWorkflow:
             self.logger.warning("ukmclient is still running after service stop, terminating residual processes.")
 
         remote.run(
-            r"pkill -f 'cashmain|ukmclient|ukmstart\.sh' >/dev/null 2>&1 || true",
+            _terminate_ukmclient_processes_command(force=False),
             use_sudo=True,
             check=False,
         )
@@ -510,7 +511,7 @@ class DbRepairWorkflow:
             self.logger.warning("ukmclient is still running after TERM, sending SIGKILL.")
 
         remote.run(
-            r"pkill -9 -f 'cashmain|ukmclient|ukmstart\.sh' >/dev/null 2>&1 || true",
+            _terminate_ukmclient_processes_command(force=True),
             use_sudo=True,
             check=False,
         )
@@ -721,10 +722,9 @@ def _wait_for_remote_test_command(test_command: str, *, timeout_seconds: int) ->
 def _wait_for_ukmclient_command(*, running: bool, timeout_seconds: int) -> str:
     process_check = (
         "("
-        "/etc/init.d/ukmclient status >/dev/null 2>&1 "
-        "|| pidof ukmclient >/dev/null 2>&1 "
+        "pidof ukmclient >/dev/null 2>&1 "
         "|| pidof cashmain >/dev/null 2>&1 "
-        "|| pgrep -f 'ukmclient|cashmain|ukmstart\\.sh' >/dev/null 2>&1"
+        f"|| pgrep -f {shlex.quote(UKMCLIENT_START_SCRIPT_PATTERN)} >/dev/null 2>&1"
         ")"
     )
     if running:
@@ -737,6 +737,16 @@ def _wait_for_ukmclient_command(*, running: bool, timeout_seconds: int) -> str:
         f"{condition}; "
         "sleep 1; i=$((i+1)); "
         "done; exit 1"
+    )
+
+
+def _terminate_ukmclient_processes_command(*, force: bool) -> str:
+    signal = "-9 " if force else ""
+    start_script = shlex.quote(UKMCLIENT_START_SCRIPT_PATTERN)
+    return (
+        f"pkill {signal}-x ukmclient >/dev/null 2>&1 || true; "
+        f"pkill {signal}-x cashmain >/dev/null 2>&1 || true; "
+        f"pkill {signal}-f {start_script} >/dev/null 2>&1 || true"
     )
 
 

@@ -5,7 +5,13 @@ from types import SimpleNamespace
 import unittest
 
 from dbrepair.config import AppConfig, ConnectionConfig, DatabaseConfig, ServiceCommands, WorkflowPaths
-from dbrepair.workflow import DbRepairWorkflow, SUCCESS_RESTORE, WorkflowError
+from dbrepair.workflow import (
+    DbRepairWorkflow,
+    SUCCESS_RESTORE,
+    WorkflowError,
+    _terminate_ukmclient_processes_command,
+    _wait_for_ukmclient_command,
+)
 
 
 class FakeLogger:
@@ -78,6 +84,30 @@ class WorkflowStopUkmclientTests(unittest.TestCase):
 
     def test_session_uses_unique_mysql_backup_name(self) -> None:
         self.assertTrue(self.session.remote_mysql_backup.endswith("mysql-db-20260308-120000-000000.tgz"))
+
+    def test_wait_for_ukmclient_ignores_task_agent_path(self) -> None:
+        command = _wait_for_ukmclient_command(running=False, timeout_seconds=60)
+
+        self.assertIn("pidof ukmclient", command)
+        self.assertIn("pidof cashmain", command)
+        self.assertIn("(^|/)ukmstart\\.sh", command)
+        self.assertNotIn("/etc/init.d/ukmclient status", command)
+        self.assertNotIn("ukmclient|cashmain|ukmstart", command)
+
+    def test_residual_termination_does_not_match_ukmtaskagent(self) -> None:
+        command = _terminate_ukmclient_processes_command(force=False)
+
+        self.assertIn("pkill -x ukmclient", command)
+        self.assertIn("pkill -x cashmain", command)
+        self.assertIn("pkill -f '(^|/)ukmstart\\.sh([[:space:]]|$)'", command)
+        self.assertNotIn("ukmclient|cashmain|ukmstart", command)
+
+    def test_forceful_residual_termination_uses_sigkill_for_exact_processes(self) -> None:
+        command = _terminate_ukmclient_processes_command(force=True)
+
+        self.assertIn("pkill -9 -x ukmclient", command)
+        self.assertIn("pkill -9 -x cashmain", command)
+        self.assertIn("pkill -9 -f", command)
 
 
 if __name__ == "__main__":
