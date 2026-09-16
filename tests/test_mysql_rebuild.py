@@ -62,6 +62,8 @@ class MysqlRebuildTests(unittest.TestCase):
         self.assertIn('password="secret"', client_config)
         self.assertIn(f"chmod 600 {path}", remote.commands[0])
         self.assertIn(f"--defaults-extra-file={path}", remote.commands[1])
+        self.assertIn("TERM=linux /etc/init.d/ukmclient start", remote.commands[1])
+        self.assertIn("pgrep -f '/usr/local/ukmclient/ukmstart.sh'", remote.commands[1])
         self.assertNotIn(self.config.database.password, remote.commands[1])
         self.assertIn(f"rm -f {path}", remote.commands[2])
 

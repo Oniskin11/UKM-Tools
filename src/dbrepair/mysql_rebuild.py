@@ -120,7 +120,7 @@ cleanup() {
     rc=$?
     rm -rf "$WORK"
     if [ "$mysql_stopped" -eq 1 ]; then /etc/init.d/mysql start || true; fi
-    if [ "$ukm_stopped" -eq 1 ]; then /etc/init.d/ukmclient start || true; fi
+    if [ "$ukm_stopped" -eq 1 ]; then TERM=linux /etc/init.d/ukmclient start || true; fi
     exit "$rc"
 }
 trap cleanup EXIT HUP INT TERM
@@ -198,8 +198,8 @@ resolve_source_server() {
         return f"""set -eu
 mysqladmin {client_option} ping --silent >/dev/null
 mysql {client_option} -N -e "SHOW DATABASES" | grep -Fx ukmclient >/dev/null
-/etc/init.d/ukmclient start
-i=0; while [ "$i" -lt 30 ]; do pgrep -x ukmclient >/dev/null 2>&1 && exit 0; sleep 1; i=$((i + 1)); done
+TERM=linux /etc/init.d/ukmclient start
+i=0; while [ "$i" -lt 30 ]; do pgrep -f '/usr/local/ukmclient/ukmstart.sh' >/dev/null 2>&1 && exit 0; sleep 1; i=$((i + 1)); done
 echo 'ukmclient did not start' >&2
 exit 1"""
 
