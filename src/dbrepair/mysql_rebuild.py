@@ -67,7 +67,9 @@ class MysqlRebuildWorkflow:
         workdir = f"/tmp/dbrepair-mysql-rebuild-{uuid.uuid4().hex}"
         recovery_required = False
         try:
-            self._run_rebuild_phase(remote, "Подготовить архивы и чистый datadir", self._prepare_rebuild_command(workdir), 240)
+            self._run_rebuild_phase(remote, "Скачать архивы UKM", self._download_archives_command(workdir), 300)
+            self._run_rebuild_phase(remote, "Проверить и распаковать архивы UKM", self._extract_archives_command(workdir), 900)
+            self._run_rebuild_phase(remote, "Подготовить чистый datadir", self._prepare_datadir_command(workdir), 90)
             recovery_required = True
             self._run_rebuild_phase(remote, "Остановить ukmclient", "/etc/init.d/ukmclient stop", 90, get_pty=True)
             self._run_rebuild_phase(remote, "Остановить MySQL", "/etc/init.d/mysql stop", 90, get_pty=True)
@@ -107,7 +109,7 @@ class MysqlRebuildWorkflow:
             except Exception as exc:
                 self.logger.warning("Не удалось вернуть службу %s после ошибки пересборки: %s", service, exc)
 
-    def _prepare_rebuild_command(self, workdir: str) -> str:
+    def _download_archives_command(self, workdir: str) -> str:
         return f'''set -eu
 RC=/usr/local/ukmclient/rc.ukm
 WORK={shlex.quote(workdir)}
@@ -121,12 +123,27 @@ wget -q --timeout=30 --tries=2 -O ukmcli-build.tgz "http://$server/ukminstall/uk
 wget -q --timeout=30 --tries=2 -O ukm-root.tar.gz "http://$server/ukminstall/ukm-root.tar.gz"
 test -s ukmcli-build.tgz
 test -s ukm-root.tar.gz
-tar tzf ukmcli-build.tgz >/dev/null
-tar tzf ukm-root.tar.gz >/dev/null
-if tar tzf ukmcli-build.tgz | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then echo 'Unsafe build archive' >&2; exit 2; fi
-if tar tzf ukm-root.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then echo 'Unsafe root archive' >&2; exit 2; fi
+echo 'Архивы UKM скачаны'
+'''
+
+    @staticmethod
+    def _extract_archives_command(workdir: str) -> str:
+        return fr'''set -eu
+WORK={shlex.quote(workdir)}
+cd "$WORK"
+tar tzf ukmcli-build.tgz > ukmcli-build.files
+tar tzf ukm-root.tar.gz > ukm-root.files
+if grep -E '(^/|(^|/)\.\.(/|$))' ukmcli-build.files >/dev/null; then echo 'Unsafe build archive' >&2; exit 2; fi
+if grep -E '(^/|(^|/)\.\.(/|$))' ukm-root.files >/dev/null; then echo 'Unsafe root archive' >&2; exit 2; fi
 tar xzf ukmcli-build.tgz
 tar xzf ukm-root.tar.gz
+echo 'Архивы UKM проверены и распакованы'
+'''
+
+    @staticmethod
+    def _prepare_datadir_command(workdir: str) -> str:
+        return f'''set -eu
+WORK={shlex.quote(workdir)}
 NEW_VAR=$(find "$WORK" -type d -path '*/usr/local/mysql*/var' -print | sed -n '1p')
 SCHEMA_DUMP=$(find "$WORK" -type f -name 'ukm.sql' -print | sed -n '1p')
 VERSION_DUMP=$(find "$WORK" -type f -name 'setver.sql' -print | sed -n '1p')
@@ -137,7 +154,7 @@ test -s "$VERSION_DUMP"
 printf '%s\n' "$NEW_VAR" > "$WORK/new_var"
 printf '%s\n' "$SCHEMA_DUMP" > "$WORK/schema_dump"
 printf '%s\n' "$VERSION_DUMP" > "$WORK/version_dump"
-echo 'Архивы проверены и распакованы'
+echo 'Чистый datadir и дампы UKM подготовлены'
 '''
 
     def _replace_datadir_command(self, workdir: str) -> str:
