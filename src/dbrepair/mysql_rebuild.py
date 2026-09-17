@@ -74,13 +74,24 @@ class MysqlRebuildWorkflow:
             self._run_rebuild_phase(remote, "Остановить ukmclient", "/etc/init.d/ukmclient stop", 90, get_pty=True)
             self._run_rebuild_phase(remote, "Остановить MySQL", "/etc/init.d/mysql stop", 90, get_pty=True)
             self._run_rebuild_phase(remote, "Заменить datadir и сохранить предыдущий", self._replace_datadir_command(workdir), 180)
-            self._run_rebuild_phase(remote, "Запустить MySQL", "/etc/init.d/mysql start", 90, get_pty=True)
-            self._run_rebuild_phase(remote, "Дождаться готовности MySQL", _mysql_ready_command(120), 130)
+            self._run_rebuild_phase(remote, "Запустить MySQL", "/etc/init.d/mysql start", 300, get_pty=True)
+            self._run_rebuild_phase(remote, "Дождаться готовности MySQL", _mysql_ready_command(300), 310)
             self._run_rebuild_phase(remote, "Загрузить схему UKM", self._import_schema_command(workdir), 600)
             self._run_rebuild_phase(remote, "Загрузить версию UKM", self._import_version_command(workdir), 180)
             self._run_rebuild_phase(remote, "Проверить схему UKM", self._schema_check_command(), 90)
-            self._apply_standard_grants(remote)
+            self._run_rebuild_phase(
+                remote,
+                "Восстановить доступ UKM к MySQL",
+                self._restore_ukm_database_account_command(),
+                90,
+            )
             self._run_rebuild_phase(remote, "Запустить ukmclient", self._start_ukmclient_command(), 90, get_pty=True)
+            self._run_rebuild_phase(
+                remote,
+                "Проверить подключение UKM к MySQL",
+                self._verify_ukm_database_account_command(),
+                90,
+            )
         except Exception:
             if recovery_required:
                 self.logger.warning("Пересборка прервана; выполняется возврат служб MySQL и ukmclient.")
@@ -176,7 +187,10 @@ WORK={shlex.quote(workdir)}
 DB_NAME={database_name}
 SCHEMA_DUMP=$(cat "$WORK/schema_dump")
 test -s "$SCHEMA_DUMP"
-mysql -e "CREATE DATABASE IF NOT EXISTS \\`$DB_NAME\\` CHARACTER SET utf8 COLLATE utf8_general_ci"
+        # UKM's legacy schema has composite VARCHAR(255) keys that exceed the
+        # 1000-byte InnoDB limit of MySQL 5.0 under UTF-8.  The vendor dump is
+        # therefore imported into its compatible one-byte character set.
+        mysql -e "CREATE DATABASE IF NOT EXISTS \\`$DB_NAME\\` CHARACTER SET latin1 COLLATE latin1_swedish_ci"
 mysql "$DB_NAME" < "$SCHEMA_DUMP"
 echo "Схема UKM загружена из $SCHEMA_DUMP"
 '''
@@ -206,8 +220,12 @@ echo "Схема UKM проверена: $TABLE_COUNT таблиц"
     def _start_ukmclient_command() -> str:
         return """set -eu
 TERM=linux /etc/init.d/ukmclient start
-i=0; while [ \"$i\" -lt 30 ]; do pgrep -f '/usr/local/ukmclient/ukmstart.sh' >/dev/null 2>&1 && exit 0; sleep 1; i=$((i + 1)); done
-echo 'ukmclient did not start' >&2
+i=0; while [ \"$i\" -lt 30 ]; do
+    if pidof cashmain >/dev/null 2>&1 || pidof ukmclient >/dev/null 2>&1; then exit 0; fi
+    sleep 1
+    i=$((i + 1))
+done
+echo 'cashmain did not start' >&2
 exit 1"""
 
     def _verify_with_database_password(self, remote: RemoteClient) -> None:
@@ -224,22 +242,62 @@ exit 1"""
         finally:
             remote.run(f"rm -f {shlex.quote(path)}", check=False)
 
-    def _apply_standard_grants(self, remote: RemoteClient) -> None:
-        """Apply the legacy UKM local accounts without logging their password."""
-        password = _sql_literal(self.config.database.password)
-        path = f"/tmp/.dbrepair-mysql-grants-{uuid.uuid4().hex}.sql"
-        grants = f"""DELETE FROM mysql.db;
-DELETE FROM mysql.user;
-GRANT ALL ON *.* TO root@'localhost' IDENTIFIED BY {password} WITH GRANT OPTION;
-GRANT ALL ON *.* TO ukm_terminal@'localhost' IDENTIFIED BY {password} WITH MAX_USER_CONNECTIONS 100 GRANT OPTION;
-GRANT ALL ON *.* TO ukm_web@'localhost' IDENTIFIED BY {password} WITH MAX_USER_CONNECTIONS 50;
+    def _restore_ukm_database_account_command(self) -> str:
+        """Restore the local UKM account from rc.ukm without exposing its password."""
+        database_name = shlex.quote(self.config.database.name)
+        return fr'''set -eu
+RC=/usr/local/ukmclient/rc.ukm
+DB_NAME={database_name}
+test -r "$RC" || {{ echo 'UKM configuration rc.ukm is unavailable' >&2; exit 1; }}
+read_rc_value() {{ grep "^$1=" "$RC" | head -n 1 | cut -d= -f2-; }}
+CONFIG_DB=$(read_rc_value base)
+UKM_USER=$(read_rc_value user)
+UKM_PASSWORD=$(read_rc_value password)
+test -n "$CONFIG_DB" && test -n "$UKM_USER" && test -n "$UKM_PASSWORD" || {{ echo 'rc.ukm does not contain database credentials' >&2; exit 1; }}
+test "$CONFIG_DB" = "$DB_NAME" || {{ echo "rc.ukm database $CONFIG_DB does not match $DB_NAME" >&2; exit 1; }}
+# rc.ukm is a key=value file.  Escape only for the SQL sent on stdin; neither
+# the password nor the generated SQL is written to the application log.
+sql_escape() {{ printf '%s' "$1" | sed -e 's/\\\\/\\\\\\\\/g' -e "s/'/\\\\'/g"; }}
+SQL_USER=$(sql_escape "$UKM_USER")
+SQL_PASSWORD=$(sql_escape "$UKM_PASSWORD")
+mysql <<EOF
+GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$SQL_USER'@'localhost' IDENTIFIED BY '$SQL_PASSWORD' WITH GRANT OPTION;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.* TO '$SQL_USER'@'localhost';
+GRANT RELOAD ON *.* TO '$SQL_USER'@'localhost';
 FLUSH PRIVILEGES;
-"""
-        remote.write_text(path, grants)
-        try:
-            remote.run(f"mysql < {path}", timeout=60)
-        finally:
-            remote.run(f"rm -f {path}", check=False)
+EOF
+echo 'UKM MySQL account restored'
+'''
+
+    def _verify_ukm_database_account_command(self) -> str:
+        """Prove that UKM can log in and that its actual cash process remains alive."""
+        database_name = shlex.quote(self.config.database.name)
+        return f'''set -eu
+RC=/usr/local/ukmclient/rc.ukm
+DB_NAME={database_name}
+read_rc_value() {{ grep "^$1=" "$RC" | head -n 1 | cut -d= -f2-; }}
+CONFIG_DB=$(read_rc_value base)
+UKM_USER=$(read_rc_value user)
+UKM_PASSWORD=$(read_rc_value password)
+test "$CONFIG_DB" = "$DB_NAME" || {{ echo "rc.ukm database $CONFIG_DB does not match $DB_NAME" >&2; exit 1; }}
+CLIENT_FILE=$(mktemp /tmp/.dbrepair-ukm-client.XXXXXX)
+umask 077
+printf '[client]\\nuser=%s\\npassword=%s\\nhost=127.0.0.1\\n' "$UKM_USER" "$UKM_PASSWORD" > "$CLIENT_FILE"
+cleanup() {{ rm -f "$CLIENT_FILE"; }}
+trap cleanup EXIT HUP INT TERM
+mysql --defaults-extra-file="$CLIENT_FILE" -D "$DB_NAME" -N -e "SHOW TABLES LIKE 'trm_in_store'" | grep -Fx trm_in_store >/dev/null
+mysql --defaults-extra-file="$CLIENT_FILE" -N -e "SELECT User FROM mysql.db WHERE Db='$DB_NAME' LIMIT 1" >/dev/null
+i=0; while [ "$i" -lt 30 ]; do
+    if pidof cashmain >/dev/null 2>&1 || pidof ukmclient >/dev/null 2>&1; then
+        echo 'UKM MySQL access and cash process verified'
+        exit 0
+    fi
+    sleep 1
+    i=$((i + 1))
+done
+echo 'cashmain did not remain running after MySQL verification' >&2
+exit 1
+'''
 
     def _preflight_command(self) -> str:
         return r"""set -u
@@ -255,6 +313,13 @@ command -v mysql >/dev/null 2>&1 || fail 'mysql is unavailable'
 echo "Check: MySQL datadir"
 test -d /usr/local/mysql || fail 'directory /usr/local/mysql is absent'
 test -d /usr/local/mysql/var || fail 'directory /usr/local/mysql/var is absent'
+echo "Check: blocked MySQL disk I/O"
+# A process in D state cannot be stopped remotely.  Replacing its datadir
+# would leave the POS with two competing MySQL states, so fail before any
+# service or data change.  Keep the probe portable for old BusyBox images.
+if ps -o stat= -C mysqld 2>/dev/null | grep -E '^[[:space:]]*D' >/dev/null; then
+    fail 'mysqld is waiting for disk I/O (D state); repair the filesystem before rebuilding'
+fi
 echo "Check: ukmcli-build.tgz"
 wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukmcli-build.tgz" || fail "cannot download ukmcli-build.tgz from $server"
 echo "Check: UKM schema dump"
@@ -313,7 +378,7 @@ cp -a "$NEW_VAR" "$VAR_DIR"
 mysql_stopped=0
 i=0; while [ "$i" -lt 60 ]; do mysqladmin ping --silent >/dev/null 2>&1 && break; sleep 1; i=$((i + 1)); done
 mysqladmin ping --silent >/dev/null 2>&1
-mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8 COLLATE utf8_general_ci"
+mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET latin1 COLLATE latin1_swedish_ci"
 # The build archive contains the canonical schema in ukm.sql.  Import it
 # explicitly and prove that the primary terminal table exists.
 SCHEMA_DUMP=$(find "$WORK" -type f -name 'ukm.sql' -print | sed -n '1p')
@@ -379,13 +444,13 @@ mysqladmin {client_option} ping --silent >/dev/null
 mysql {client_option} -N -e "SHOW DATABASES" | grep -Fx {database_name} >/dev/null
 mysql {client_option} -N {database_name} -e "SHOW TABLES LIKE 'trm_in_store'" | grep -Fx trm_in_store >/dev/null
 TERM=linux /etc/init.d/ukmclient start
-i=0; while [ "$i" -lt 30 ]; do pgrep -f '/usr/local/ukmclient/ukmstart.sh' >/dev/null 2>&1 && exit 0; sleep 1; i=$((i + 1)); done
-echo 'ukmclient did not start' >&2
+i=0; while [ "$i" -lt 30 ]; do
+    if pidof cashmain >/dev/null 2>&1 || pidof ukmclient >/dev/null 2>&1; then exit 0; fi
+    sleep 1
+    i=$((i + 1))
+done
+echo 'cashmain did not start' >&2
 exit 1"""
-
-
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _mysql_ready_command(seconds: int) -> str:
