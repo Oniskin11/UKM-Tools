@@ -67,7 +67,7 @@ class KktTimeSerialTests(unittest.TestCase):
     def test_rejects_failed_verification_response(self) -> None:
         output = "__DBREPAIR_KKT_RESPONSE__\n" + _response(23, result=1)
 
-        with self.assertRaisesRegex(KktApiError, "DateTimeGet failed"):
+        with self.assertRaisesRegex(KktApiError, "DateTimeGet ККТ завершилась ошибкой"):
             _verified_kkt_datetime(output)
 
     def test_uses_one_privileged_serial_exchange(self) -> None:
