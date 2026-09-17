@@ -187,10 +187,10 @@ WORK={shlex.quote(workdir)}
 DB_NAME={database_name}
 SCHEMA_DUMP=$(cat "$WORK/schema_dump")
 test -s "$SCHEMA_DUMP"
-        # UKM's legacy schema has composite VARCHAR(255) keys that exceed the
-        # 1000-byte InnoDB limit of MySQL 5.0 under UTF-8.  The vendor dump is
-        # therefore imported into its compatible one-byte character set.
-        mysql -e "CREATE DATABASE IF NOT EXISTS \\`$DB_NAME\\` CHARACTER SET latin1 COLLATE latin1_swedish_ci"
+# The UKM distribution and POS MySQL configuration use UTF-8.  Do not use
+# latin1 here: tables without an explicit charset inherit the database charset
+# and incoming Cyrillic data would be converted to question marks.
+mysql -e "CREATE DATABASE IF NOT EXISTS \\`$DB_NAME\\` CHARACTER SET utf8 COLLATE utf8_general_ci"
 mysql "$DB_NAME" < "$SCHEMA_DUMP"
 echo "Схема UKM загружена из $SCHEMA_DUMP"
 '''
@@ -213,6 +213,10 @@ DB_NAME={database_name}
 mysql "$DB_NAME" -N -e "SHOW TABLES LIKE 'trm_in_store'" | grep -Fx trm_in_store >/dev/null
 TABLE_COUNT=$(mysql "$DB_NAME" -N -e 'SHOW TABLES' | wc -l | tr -d '[:space:]')
 test "$TABLE_COUNT" -ge 100 || {{ echo "UKM schema is incomplete: only $TABLE_COUNT tables" >&2; exit 1; }}
+DB_CHARSET=$(mysql -N -e "SELECT DEFAULT_CHARACTER_SET_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='$DB_NAME'")
+test "$DB_CHARSET" = utf8 || {{ echo "UKM database charset must be utf8, got: $DB_CHARSET" >&2; exit 1; }}
+USER_NAME_CHARSET=$(mysql -N -e "SELECT CHARACTER_SET_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='$DB_NAME' AND TABLE_NAME='trm_in_users' AND COLUMN_NAME='name'")
+test "$USER_NAME_CHARSET" = utf8 || {{ echo "UKM cashier names must use utf8, got: $USER_NAME_CHARSET" >&2; exit 1; }}
 echo "Схема UKM проверена: $TABLE_COUNT таблиц"
 '''
 
@@ -378,7 +382,7 @@ cp -a "$NEW_VAR" "$VAR_DIR"
 mysql_stopped=0
 i=0; while [ "$i" -lt 60 ]; do mysqladmin ping --silent >/dev/null 2>&1 && break; sleep 1; i=$((i + 1)); done
 mysqladmin ping --silent >/dev/null 2>&1
-mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET latin1 COLLATE latin1_swedish_ci"
+mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8 COLLATE utf8_general_ci"
 # The build archive contains the canonical schema in ukm.sql.  Import it
 # explicitly and prove that the primary terminal table exists.
 SCHEMA_DUMP=$(find "$WORK" -type f -name 'ukm.sql' -print | sed -n '1p')
