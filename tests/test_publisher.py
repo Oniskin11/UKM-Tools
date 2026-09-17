@@ -1,9 +1,12 @@
 import zipfile
+from pathlib import Path
 
 import pytest
 
-from dbrepair.publisher import PublishError, collect_kkt_drivers, collect_tspiot_binaries, detect_version, publish_distribution_local
+from dbrepair.publisher import PublishError, collect_kkt_drivers, collect_tspiot_binaries, detect_version, publish_distribution, publish_distribution_local
 from dbrepair.distsource import LocalDistSource
+from dbrepair.config import PublishConfig
+import dbrepair.publisher as publisher
 
 
 def test_detect_version():
@@ -89,6 +92,7 @@ def test_publish_distribution_to_local_directory_creates_web_layout(tmp_path):
     (source / "x86").mkdir()
     (source / "x64" / "libsp-kkt-driver-x64.so").write_bytes(b"driver64")
     (source / "x86" / "tspiot").write_bytes(b"tspiot32")
+    (source / "gismt_cert.txt").write_bytes(b"certificate")
 
     class Logger:
         def info(self, *args):
@@ -103,5 +107,46 @@ def test_publish_distribution_to_local_directory_creates_web_layout(tmp_path):
     assert (root / "kkt" / "latest.json").read_text(encoding="utf-8") == '{"version": "1.0.0.0.512"}\n'
     assert (root / "tspiot" / "latest.json").is_file()
     assert (root / "kkt" / result.version / "x64" / "libsp-kkt-driver-x64.so.sha256").is_file()
+    assert (root / "gismt_cert.txt").read_bytes() == b"certificate"
+    assert (root / "gismt_cert.txt.sha256").is_file()
+    assert result.gismt_cert_hash is not None
     assert LocalDistSource(root).kkt_driver("x64").version == result.version
     assert LocalDistSource(root).tspiot("x86").filename == "tspiot"
+
+
+def test_publish_certificate_only_to_web_root(tmp_path, monkeypatch):
+    source = tmp_path / "certificate.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("package/gismt_cert.txt", b"certificate")
+
+    class Logger:
+        def info(self, *args):
+            pass
+
+    class Remote:
+        uploads: list[tuple[str, str]] = []
+        writes: list[tuple[str, str]] = []
+
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def upload(self, source_path, destination):
+            self.uploads.append((Path(source_path).name, destination))
+
+        def write_text(self, path, text):
+            self.writes.append((path, text))
+
+        def run(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(publisher, "RemoteClient", Remote)
+    result = publish_distribution(PublishConfig(host="web", username="root", ukm_dir="/var/www/files/UKM"), source, Logger())
+    assert result.gismt_cert_hash is not None
+    assert Remote.uploads == [("gismt_cert.txt", "/var/www/files/UKM/gismt_cert.txt")]
+    assert Remote.writes[0][0] == "/var/www/files/UKM/gismt_cert.txt.sha256"

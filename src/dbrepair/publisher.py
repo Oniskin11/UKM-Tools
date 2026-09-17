@@ -37,6 +37,7 @@ class PublishResult:
     version: str
     hashes: dict[str, str]  # arch -> sha256
     tspiot_hashes: dict[str, str] | None = None
+    gismt_cert_hash: str | None = None
 
 
 PublishProgress = "typing.Callable[[str, str, str], None]"  # (arch, version, sha256)
@@ -122,6 +123,27 @@ def collect_tspiot_binaries(source: Path, workdir: Path) -> dict[str, Path]:
     return result
 
 
+def collect_gismt_cert(source: Path, workdir: Path) -> Path | None:
+    """Найти `gismt_cert.txt` в ZIP или папке и подготовить его к публикации."""
+    filename = "gismt_cert.txt"
+    if source.is_file() and source.suffix.lower() == ".zip":
+        with zipfile.ZipFile(source) as archive:
+            for entry in archive.namelist():
+                if entry.endswith("/") or entry.replace("\\", "/").split("/")[-1].lower() != filename:
+                    continue
+                target = workdir / filename
+                with archive.open(entry) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                return target
+    elif source.is_dir():
+        for path in sorted(p for p in source.rglob("*") if p.is_file()):
+            if path.name.lower() == filename:
+                return path
+    else:
+        raise PublishError(f"Источник должен быть .zip или папкой: {source}")
+    return None
+
+
 def _publish_latest(remote: RemoteClient, publish: PublishConfig, kind: str, version: str) -> None:
     base = posixpath.join(publish.ukm_dir, kind)
     target = posixpath.join(base, "latest.json")
@@ -153,11 +175,13 @@ def publish_distribution_local(root: Path, source: Path, logger, *, version: str
         except PublishError:
             drivers = {}
         tspiot = collect_tspiot_binaries(source, workdir)
-        if not drivers and not tspiot:
-            raise PublishError("Не найдены ни драйвер ККТ, ни бинарник tspiot.")
+        gismt_cert = collect_gismt_cert(source, workdir)
+        if not drivers and not tspiot and gismt_cert is None:
+            raise PublishError("Не найдены драйвер ККТ, бинарник tspiot или gismt_cert.txt.")
 
         hashes: dict[str, str] = {}
         tspiot_hashes: dict[str, str] = {}
+        gismt_cert_hash: str | None = None
         for kind, files, output in (("kkt", drivers, hashes), ("tspiot", tspiot, tspiot_hashes)):
             if not files:
                 continue
@@ -174,7 +198,15 @@ def publish_distribution_local(root: Path, source: Path, logger, *, version: str
             _atomic_write(root / kind / "latest.json", (json.dumps({"version": version}) + "\n").encode("utf-8"))
             logger.info("published latest %s version pointer: %s", kind, version)
 
-    return PublishResult(version=version, hashes=hashes, tspiot_hashes=tspiot_hashes)
+        if gismt_cert is not None:
+            target = root / "gismt_cert.txt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(target, gismt_cert.read_bytes())
+            gismt_cert_hash = _sha256(gismt_cert)
+            _atomic_write(target.with_name(target.name + ".sha256"), (gismt_cert_hash + "\n").encode("ascii"))
+            logger.info("published gismt certificate -> %s (sha256 %s)", target, gismt_cert_hash)
+
+    return PublishResult(version=version, hashes=hashes, tspiot_hashes=tspiot_hashes, gismt_cert_hash=gismt_cert_hash)
 
 
 def publish_distribution(publish: PublishConfig, source: Path, logger, *, version: str | None = None) -> PublishResult:
@@ -189,10 +221,12 @@ def publish_distribution(publish: PublishConfig, source: Path, logger, *, versio
         except PublishError:
             drivers = {}
         tspiot = collect_tspiot_binaries(source, workdir)
-        if not drivers and not tspiot:
-            raise PublishError("Не найдены ни драйвер ККТ, ни бинарник tspiot.")
+        gismt_cert = collect_gismt_cert(source, workdir)
+        if not drivers and not tspiot and gismt_cert is None:
+            raise PublishError("Не найдены драйвер ККТ, бинарник tspiot или gismt_cert.txt.")
         hashes: dict[str, str] = {}
         tspiot_hashes: dict[str, str] = {}
+        gismt_cert_hash: str | None = None
         with RemoteClient(connection, logger) as remote:
             for kind, files, output in (("kkt", drivers, hashes), ("tspiot", tspiot, tspiot_hashes)):
                 if not files:
@@ -212,7 +246,14 @@ def publish_distribution(publish: PublishConfig, source: Path, logger, *, versio
                 remote.run(f"find {shlex.quote(version_dir)} -type f -exec chmod 644 {{}} +", check=False)
                 _publish_latest(remote, publish, kind, version)
                 logger.info("published latest %s version pointer: %s", kind, version)
-    return PublishResult(version=version, hashes=hashes, tspiot_hashes=tspiot_hashes)
+            if gismt_cert is not None:
+                remote_cert = posixpath.join(publish.ukm_dir, "gismt_cert.txt")
+                remote.upload(gismt_cert, remote_cert)
+                gismt_cert_hash = _sha256(gismt_cert)
+                remote.write_text(remote_cert + ".sha256", gismt_cert_hash + "\n")
+                remote.run(f"chown {shlex.quote(publish.owner)} {shlex.quote(remote_cert)}* && chmod 644 {shlex.quote(remote_cert)}*")
+                logger.info("published gismt certificate -> %s (sha256 %s)", remote_cert, gismt_cert_hash)
+    return PublishResult(version=version, hashes=hashes, tspiot_hashes=tspiot_hashes, gismt_cert_hash=gismt_cert_hash)
 
 
 def _sha256(path: Path) -> str:
