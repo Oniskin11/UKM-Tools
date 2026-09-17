@@ -1302,6 +1302,8 @@ class PublishPanel:
                         parts.append("KKT: " + ", ".join(sorted(result.hashes)))
                     if result.tspiot_hashes:
                         parts.append("ТС ПИоТ: " + ", ".join(sorted(result.tspiot_hashes)))
+                    if result.gismt_cert_hash:
+                        parts.append("сертификат ГИС МТ")
                     self.summary_var.set(f"Опубликовано v{result.version} ({'; '.join(parts)}).")
         self.root.after(100, self._process_events)
 
