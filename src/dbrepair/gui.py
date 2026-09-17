@@ -20,7 +20,7 @@ from .config import (
 )
 from .distsource import build_source
 from .logging_utils import configure_logger
-from .publisher import PublishError, detect_version, publish_distribution
+from .publisher import PublishError, detect_version, publish_distribution, publish_distribution_local
 from .remote import OperationCancelledError
 from .kkt_time import KKT_TIME_STEPS, sync_kkt_time
 from .mysql_rebuild import MYSQL_REBUILD_STEPS, MysqlRebuildWorkflow
@@ -1059,7 +1059,7 @@ class KktTimePanel(BasePanel):
 
 
 class PublishPanel:
-    """Публикация ККТ и ТС ПИоТ из одного ZIP или каталога на веб-сервер."""
+    """Размещение ККТ и ТС ПИоТ из одного ZIP или каталога на вебе либо локально."""
 
     def __init__(self, root: tk.Tk, parent: ttk.Frame, config_path_var: tk.StringVar):
         self.root = root
@@ -1068,6 +1068,7 @@ class PublishPanel:
         self.source_var = tk.StringVar()
         self.version_var = tk.StringVar()
         self.summary_var = tk.StringVar(value="Выберите zip-архив или папку с драйвером ККТ и/или ТС ПИоТ.")
+        self.local_destination: Path | None = None
         self.busy = False
 
         queue_handler = QueueLogHandler(self.event_queue, "publish")
@@ -1088,7 +1089,7 @@ class PublishPanel:
         content = ttk.PanedWindow(parent, orient="vertical")
         content.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
 
-        form = ttk.LabelFrame(content, text="Драйвер ККТ", padding=12)
+        form = ttk.LabelFrame(content, text="Файлы дистрибутива", padding=12)
         form.columnconfigure(1, weight=1)
 
         ttk.Label(form, text="Файл (.zip) или папка дистрибутива").grid(row=0, column=0, sticky="w", padx=(0, 8))
@@ -1108,7 +1109,7 @@ class PublishPanel:
         actions.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         actions.columnconfigure(1, weight=1)
         self.publish_button = ttk.Button(
-            actions, text="Опубликовать на веб-сервер", command=self.publish, style="Accent.TButton"
+            actions, text="Разместить файлы", command=self.publish, style="Accent.TButton"
         )
         self.publish_button.grid(row=0, column=0, padx=(0, 8))
         ttk.Label(actions, textvariable=self.summary_var, style="Summary.TLabel").grid(row=0, column=1, sticky="w")
@@ -1161,6 +1162,18 @@ class PublishPanel:
         if version:
             self.version_var.set(version)
 
+    def set_destination(self, local_dir: Path | None) -> None:
+        """Показать выбранный в конфиге способ размещения без скрытия вкладки."""
+        self.local_destination = local_dir
+        if local_dir is not None:
+            self.publish_button.configure(text="Разложить в локальный каталог")
+            if not self.busy:
+                self.summary_var.set(f"Файлы будут разложены в {local_dir}.")
+        else:
+            self.publish_button.configure(text="Опубликовать на веб-сервер")
+            if not self.busy:
+                self.summary_var.set("Файлы будут опубликованы на веб-сервере.")
+
     def publish(self) -> None:
         if self.busy:
             return
@@ -1175,8 +1188,12 @@ class PublishPanel:
         except ConfigError as exc:
             self.summary_var.set(f"Ошибка конфига: {_shorten(str(exc))}")
             return
+        local_dir = config.distribution.local_dir if config.distribution is not None else None
+        if local_dir is not None:
+            self._start_worker(config_path, source, self.version_var.get().strip(), None, False)
+            return
         if config.publish is None:
-            self.summary_var.set("В config.toml нет секции [publish].")
+            self.summary_var.set("Для веб-публикации в config.toml нужна секция [publish].")
             return
 
         answer = self._ask_password(config.publish.host, config.publish.username, config.publish.password)
@@ -1188,12 +1205,15 @@ class PublishPanel:
             self.summary_var.set("Пароль не введён.")
             return
 
+        self._start_worker(config_path, source, self.version_var.get().strip(), password, save)
+
+    def _start_worker(self, config_path: str, source: str, version: str, password: str | None, save: bool) -> None:
         self.busy = True
         self.publish_button.configure(state="disabled")
-        self.summary_var.set("Публикация...")
+        self.summary_var.set("Размещение файлов...")
         threading.Thread(
             target=self._worker,
-            args=(config_path, source, self.version_var.get().strip(), password, save),
+            args=(config_path, source, version, password, save),
             daemon=True,
         ).start()
 
@@ -1239,14 +1259,18 @@ class PublishPanel:
             return None
         return str(result["password"]), bool(result["save"])
 
-    def _worker(self, config_path: str, source: str, version: str, password: str, save: bool) -> None:
+    def _worker(self, config_path: str, source: str, version: str, password: str | None, save: bool) -> None:
         try:
             config = load_config(config_path)
-            if config.publish is None:
-                raise PublishError("В config.toml отсутствует секция [publish] (доступ к веб-серверу).")
-            publish_config = replace(config.publish, password=password)
-            result = publish_distribution(publish_config, Path(source), self.logger, version=version or None)
-            if save:
+            local_dir = config.distribution.local_dir if config.distribution is not None else None
+            if local_dir is not None:
+                result = publish_distribution_local(local_dir, Path(source), self.logger, version=version or None)
+            else:
+                if config.publish is None or password is None:
+                    raise PublishError("В config.toml отсутствует секция [publish] (доступ к веб-серверу).")
+                publish_config = replace(config.publish, password=password)
+                result = publish_distribution(publish_config, Path(source), self.logger, version=version or None)
+            if save and password is not None:
                 try:
                     save_publish_password(config_path, password)
                     self.logger.info("Пароль сохранён в %s", config_path)
@@ -1436,7 +1460,7 @@ class SettingsDialog:
         ttk.Button(self.local_box, text="Обзор", command=self._browse_local).grid(row=0, column=2, padx=(8, 0))
 
         ttk.Label(
-            tab, text="Публикация драйверов доступна только при HTTP-источнике (вкладка «Публикация»)."
+            tab, text="Архивы и папки дистрибутивов можно разложить через вкладку «Публикация файлов» для любого источника."
         ).grid(row=4, column=0, sticky="w", pady=(10, 0))
 
     def _add_field(self, parent, row, section, key, label, kind, value) -> None:
@@ -1622,13 +1646,17 @@ class DbRepairGui:
         return config.webserver is not None or dist is None
 
     def _apply_source_visibility(self) -> None:
-        """Вкладка «Публикация драйвера» видна только при HTTP-источнике."""
-        is_http = self._current_source_is_http()
+        """Показать вкладку публикации для веб- и локального источников."""
+        local_dir = None
         try:
-            if is_http:
-                self.outer.add(self.publish_tab, text="Публикация файлов")
-            else:
-                self.outer.hide(self.publish_tab)
+            config = load_config(self.config_path_var.get().strip())
+            if config.distribution is not None:
+                local_dir = config.distribution.local_dir
+        except ConfigError:
+            pass
+        try:
+            self.outer.add(self.publish_tab, text="Публикация файлов")
+            self.publish_panel.set_destination(local_dir)
         except tk.TclError:
             pass
 

@@ -109,16 +109,20 @@ test -d /usr/local/mysql || fail 'directory /usr/local/mysql is absent'
 test -d /usr/local/mysql/var || fail 'directory /usr/local/mysql/var is absent'
 echo "Check: ukmcli-build.tgz"
 wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukmcli-build.tgz" || fail "cannot download ukmcli-build.tgz from $server"
+echo "Check: UKM schema dump"
+wget -q --timeout=30 --tries=1 -O - "http://$server/ukminstall/ukmcli-build.tgz" | tar tzf - | grep -E '(^|/)ukm\.sql$' >/dev/null || fail 'ukmcli-build.tgz does not contain ukm.sql'
 echo "Check: ukm-root.tar.gz"
 wget -q --spider --timeout=15 --tries=1 "http://$server/ukminstall/ukm-root.tar.gz" || fail "cannot download ukm-root.tar.gz from $server"
 echo Source: http://$server/ukminstall"""
 
     def _rebuild_command(self) -> str:
-        return r"""set -eu
+        database_name = shlex.quote(self.config.database.name)
+        return f"""set -eu
 MYSQL_DIR=/usr/local/mysql
 VAR_DIR=/usr/local/mysql/var
 RC=/usr/local/ukmclient/rc.ukm
-fail() { echo "MySQL rebuild failed: $1" >&2; return 1; }
+DB_NAME={database_name}
+fail() {{ echo "MySQL rebuild failed: $1" >&2; return 1; }}
 """ + self._source_server_resolver() + r"""
 WORK=$(mktemp -d /tmp/dbrepair-mysql-rebuild.XXXXXX)
 ukm_stopped=0
@@ -161,8 +165,19 @@ cp -a "$NEW_VAR" "$VAR_DIR"
 mysql_stopped=0
 i=0; while [ "$i" -lt 60 ]; do mysqladmin ping --silent >/dev/null 2>&1 && break; sleep 1; i=$((i + 1)); done
 mysqladmin ping --silent >/dev/null 2>&1
-mysql -e 'CREATE DATABASE IF NOT EXISTS ukmclient CHARACTER SET utf8 COLLATE utf8_general_ci'
-find "$WORK" -type f -name '*.sql' -print | LC_ALL=C sort -r | while IFS= read -r sql; do mysql ukmclient < "$sql"; done
+mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8 COLLATE utf8_general_ci"
+# The build archive contains the canonical schema in ukm.sql.  Import it
+# explicitly and prove that the primary terminal table exists.
+SCHEMA_DUMP=$(find "$WORK" -type f -name 'ukm.sql' -print | sed -n '1p')
+VERSION_DUMP=$(find "$WORK" -type f -name 'setver.sql' -print | sed -n '1p')
+test -s "$SCHEMA_DUMP" || { echo 'UKM schema dump ukm.sql was not found' >&2; exit 1; }
+test -s "$VERSION_DUMP" || { echo 'UKM version dump setver.sql was not found' >&2; exit 1; }
+mysql "$DB_NAME" < "$SCHEMA_DUMP"
+mysql "$DB_NAME" < "$VERSION_DUMP"
+mysql "$DB_NAME" -N -e "SHOW TABLES LIKE 'trm_in_store'" | grep -Fx trm_in_store >/dev/null
+TABLE_COUNT=$(mysql "$DB_NAME" -N -e 'SHOW TABLES' | wc -l | tr -d '[:space:]')
+test "$TABLE_COUNT" -ge 100 || { echo "UKM schema is incomplete: only $TABLE_COUNT tables" >&2; exit 1; }
+echo "UKM schema restored: $TABLE_COUNT tables"
 echo "Previous datadir kept at $BACKUP"
 """
 
@@ -204,9 +219,11 @@ resolve_source_server() {
 
     def _verify_command(self, client_config: str) -> str:
         client_option = shlex.quote(f"--defaults-extra-file={client_config}")
+        database_name = shlex.quote(self.config.database.name)
         return f"""set -eu
 mysqladmin {client_option} ping --silent >/dev/null
-mysql {client_option} -N -e "SHOW DATABASES" | grep -Fx ukmclient >/dev/null
+mysql {client_option} -N -e "SHOW DATABASES" | grep -Fx {database_name} >/dev/null
+mysql {client_option} -N {database_name} -e "SHOW TABLES LIKE 'trm_in_store'" | grep -Fx trm_in_store >/dev/null
 TERM=linux /etc/init.d/ukmclient start
 i=0; while [ "$i" -lt 30 ]; do pgrep -f '/usr/local/ukmclient/ukmstart.sh' >/dev/null 2>&1 && exit 0; sleep 1; i=$((i + 1)); done
 echo 'ukmclient did not start' >&2

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 import posixpath
 import re
@@ -128,6 +129,52 @@ def _publish_latest(remote: RemoteClient, publish: PublishConfig, kind: str, ver
     remote.write_text(temporary, json.dumps({"version": version}) + "\n")
     remote.run(f"chown {shlex.quote(publish.owner)} {shlex.quote(temporary)} && chmod 644 {shlex.quote(temporary)}")
     remote.run(f"mv -f {shlex.quote(temporary)} {shlex.quote(target)}")
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Записать файл целиком, не оставляя читателю промежуточную версию."""
+    temporary = path.with_name(path.name + ".dbrepair.new")
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
+
+
+def publish_distribution_local(root: Path, source: Path, logger, *, version: str | None = None) -> PublishResult:
+    """Разложить дистрибутив в локальный каталог в том же формате, что и на вебе."""
+    root = Path(root)
+    source = Path(source)
+    version = (version or detect_version(source.name) or datetime.now(timezone.utc).strftime("%Y.%m.%d.%H%M%S")).strip()
+    if not re.fullmatch(r"\d+(?:\.\d+)+", version):
+        raise PublishError("Версия должна состоять из чисел, разделённых точками.")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workdir = Path(tmpdir)
+        try:
+            drivers = collect_kkt_drivers(source, workdir)
+        except PublishError:
+            drivers = {}
+        tspiot = collect_tspiot_binaries(source, workdir)
+        if not drivers and not tspiot:
+            raise PublishError("Не найдены ни драйвер ККТ, ни бинарник tspiot.")
+
+        hashes: dict[str, str] = {}
+        tspiot_hashes: dict[str, str] = {}
+        for kind, files, output in (("kkt", drivers, hashes), ("tspiot", tspiot, tspiot_hashes)):
+            if not files:
+                continue
+            for arch, path in sorted(files.items()):
+                target_dir = root / kind / version / arch
+                target_dir.mkdir(parents=True, exist_ok=True)
+                filename = path.name if kind == "kkt" else "tspiot"
+                target = target_dir / filename
+                _atomic_write(target, path.read_bytes())
+                digest = _sha256(path)
+                _atomic_write(target.with_name(target.name + ".sha256"), (digest + "\n").encode("ascii"))
+                output[arch] = digest
+                logger.info("published %s %s -> %s (sha256 %s)", version, arch, target, digest)
+            _atomic_write(root / kind / "latest.json", (json.dumps({"version": version}) + "\n").encode("utf-8"))
+            logger.info("published latest %s version pointer: %s", kind, version)
+
+    return PublishResult(version=version, hashes=hashes, tspiot_hashes=tspiot_hashes)
 
 
 def publish_distribution(publish: PublishConfig, source: Path, logger, *, version: str | None = None) -> PublishResult:
