@@ -1,0 +1,3 @@
+[console_scripts]
+dbrepair = dbrepair.cli:main
+dbrepair-gui = dbrepair.gui:main

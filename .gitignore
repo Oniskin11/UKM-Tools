@@ -9,7 +9,7 @@ logs/
 
 # Build artifacts
 build/
-dist/
+
 
 # Local (secret) config — commit only config.example.toml
 config.toml
