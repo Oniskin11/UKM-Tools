@@ -2,7 +2,8 @@ import zipfile
 
 import pytest
 
-from dbrepair.publisher import PublishError, collect_kkt_drivers, collect_tspiot_binaries, detect_version
+from dbrepair.publisher import PublishError, collect_kkt_drivers, collect_tspiot_binaries, detect_version, publish_distribution_local
+from dbrepair.distsource import LocalDistSource
 
 
 def test_detect_version():
@@ -80,3 +81,27 @@ def test_collect_tspiot_ignores_documentation(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     assert set(collect_tspiot_binaries(source, work)) == {"x64"}
+
+
+def test_publish_distribution_to_local_directory_creates_web_layout(tmp_path):
+    source = tmp_path / "Developer package 1.0.0.0.512"
+    (source / "x64").mkdir(parents=True)
+    (source / "x86").mkdir()
+    (source / "x64" / "libsp-kkt-driver-x64.so").write_bytes(b"driver64")
+    (source / "x86" / "tspiot").write_bytes(b"tspiot32")
+
+    class Logger:
+        def info(self, *args):
+            pass
+
+    root = tmp_path / "UKM"
+    result = publish_distribution_local(root, source, Logger())
+
+    assert result.version == "1.0.0.0.512"
+    assert (root / "kkt" / result.version / "x64" / "libsp-kkt-driver-x64.so").read_bytes() == b"driver64"
+    assert (root / "tspiot" / result.version / "x86" / "tspiot").read_bytes() == b"tspiot32"
+    assert (root / "kkt" / "latest.json").read_text(encoding="utf-8") == '{"version": "1.0.0.0.512"}\n'
+    assert (root / "tspiot" / "latest.json").is_file()
+    assert (root / "kkt" / result.version / "x64" / "libsp-kkt-driver-x64.so.sha256").is_file()
+    assert LocalDistSource(root).kkt_driver("x64").version == result.version
+    assert LocalDistSource(root).tspiot("x86").filename == "tspiot"
