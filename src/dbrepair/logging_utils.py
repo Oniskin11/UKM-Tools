@@ -2,8 +2,22 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+import copy
 import logging
 import sys
+
+from .localization import localize_message
+
+
+class RussianFormatter(logging.Formatter):
+    """Переводит операторские сообщения, оставляя команду и её вывод читаемыми."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        localized = copy.copy(record)
+        localized.msg = localize_message(record.getMessage())
+        localized.args = ()
+        rendered = super().format(localized)
+        return "\n".join(localize_message(line) for line in rendered.splitlines())
 
 
 def configure_logger(
@@ -27,7 +41,7 @@ def configure_logger(
     logger.handlers.clear()
     logger.propagate = False
 
-    formatter = logging.Formatter(
+    formatter = RussianFormatter(
         fmt="%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )

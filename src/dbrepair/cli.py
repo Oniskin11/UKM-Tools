@@ -6,28 +6,29 @@ import sys
 from .config import ConfigError, load_config, override_host
 from .distsource import DistError, build_source
 from .logging_utils import configure_logger
+from .localization import localize_message
 from .tspiot import TsPiotInstaller
 from .workflow import DbRepairWorkflow, WorkflowError
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Automate DB repair workflow on a remote cash register over SSH/SFTP."
+        description="Восстановление БД и обслуживание кассы по SSH/SFTP."
     )
     parser.add_argument(
         "--config",
         default="config.toml",
-        help="Path to TOML config file. Default: ./config.toml",
+        help="Путь к TOML-файлу конфигурации. По умолчанию: ./config.toml",
     )
     parser.add_argument(
         "--log-file",
         default=None,
-        help="Optional path to log file. Default: logs/dbrepair-YYYYMMDD-HHMMSS.log",
+        help="Необязательный путь к журналу. По умолчанию: logs/dbrepair-ГГГГММДД-ЧЧММСС.log",
     )
     parser.add_argument(
         "--gui",
         action="store_true",
-        help="Launch the Tkinter GUI instead of the console workflow.",
+        help="Запустить графический интерфейс вместо консольного режима.",
     )
     parser.add_argument(
         "--tspiot",
@@ -46,15 +47,15 @@ def _run_tspiot(args) -> int:
     try:
         config = load_config(args.config)
     except ConfigError as exc:
-        print(f"Config error: {exc}", file=sys.stderr)
+        print(f"Ошибка конфигурации: {localize_message(str(exc))}", file=sys.stderr)
         return 2
     if config.tspiot is None:
-        print("Config error: отсутствует секция [tspiot].", file=sys.stderr)
+        print("Ошибка конфигурации: отсутствует секция [tspiot].", file=sys.stderr)
         return 2
     try:
         source = build_source(config)
     except DistError as exc:
-        print(f"Config error: {exc}", file=sys.stderr)
+        print(f"Ошибка конфигурации: {localize_message(str(exc))}", file=sys.stderr)
         return 2
 
     logger, log_path = configure_logger(
@@ -68,7 +69,8 @@ def _run_tspiot(args) -> int:
     def progress(step, status, details):
         if status in {"success", "error"}:
             suffix = f" ({details})" if details else ""
-            print(f"  [{step.number}] {step.title}: {status}{suffix}")
+            status_label = "Успех" if status == "success" else "Ошибка"
+            print(f"  [{step.number}] {step.title}: {status_label}{suffix}")
 
     failures = 0
     for host in hosts:
@@ -84,13 +86,13 @@ def _run_tspiot(args) -> int:
                 auto_detect=True,
             )
             installer.run(progress=progress)
-            print(f"  {host}: OK")
+            print(f"  {host}: Успех")
         except (WorkflowError, RuntimeError, OSError, TimeoutError, ValueError, KeyError) as exc:
             failures += 1
             logger.exception("TS PIoT installation failed for %s.", host)
-            print(f"  {host}: FAIL — {exc}", file=sys.stderr)
+            print(f"  {host}: Ошибка — {localize_message(str(exc))}", file=sys.stderr)
 
-    print(f"Detailed log: {log_path}")
+    print(f"Подробный журнал: {log_path}")
     return 1 if failures else 0
 
 
@@ -110,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(args.config)
     except ConfigError as exc:
-        print(f"Config error: {exc}", file=sys.stderr)
+        print(f"Ошибка конфигурации: {localize_message(str(exc))}", file=sys.stderr)
         return 2
 
     logger, log_path = configure_logger(
@@ -124,15 +126,15 @@ def main(argv: list[str] | None = None) -> int:
         artifacts = DbRepairWorkflow(config, logger).run()
     except (WorkflowError, RuntimeError, OSError, TimeoutError) as exc:
         logger.exception("Workflow failed.")
-        print(f"Workflow failed: {exc}", file=sys.stderr)
-        print(f"Detailed log: {log_path}", file=sys.stderr)
+        print(f"Восстановление БД завершилось с ошибкой: {localize_message(str(exc))}", file=sys.stderr)
+        print(f"Подробный журнал: {log_path}", file=sys.stderr)
         return 1
 
-    print("DB repair completed successfully.")
-    print(f"Local SQL backup: {artifacts.local_dump_copy}")
-    print(f"Remote SQL backup: {artifacts.remote_dump_copy}")
-    print(f"Remote MySQL datadir backup: {artifacts.remote_mysql_backup}")
-    print(f"Detailed log: {log_path}")
+    print("Восстановление БД успешно завершено.")
+    print(f"Локальная копия SQL: {artifacts.local_dump_copy}")
+    print(f"Копия SQL на кассе: {artifacts.remote_dump_copy}")
+    print(f"Резервная копия datadir MySQL на кассе: {artifacts.remote_mysql_backup}")
+    print(f"Подробный журнал: {log_path}")
     return 0
 
 

@@ -23,6 +23,7 @@ from .logging_utils import configure_logger
 from .publisher import PublishError, detect_version, publish_distribution, publish_distribution_local
 from .remote import OperationCancelledError
 from .kkt_time import KKT_TIME_STEPS, sync_kkt_time
+from .localization import localize_message
 from .mysql_rebuild import MYSQL_REBUILD_STEPS, MysqlRebuildWorkflow
 from .tspiot import TSPIOT_STEPS, TsPiotInstaller, detect_environment, reboot_host
 from .workflow import DbRepairWorkflow, WORKFLOW_STEPS, WorkflowArtifacts
@@ -283,10 +284,10 @@ class BaseTargetView:
             self._run(step_ids, config_path, host, cancel_event, progress)
         except OperationCancelledError as exc:
             self.logger.info("Task cancelled by user.")
-            self.panel.event_queue.put(("task-cancel", host, current_step_id, str(exc)))
+            self.panel.event_queue.put(("task-cancel", host, current_step_id, localize_message(str(exc))))
         except (ConfigError, RuntimeError, OSError, TimeoutError, ValueError, KeyError) as exc:
             self.logger.exception("Task failed.")
-            self.panel.event_queue.put(("task-error", host, step_ids if not progress_seen else [], str(exc)))
+            self.panel.event_queue.put(("task-error", host, step_ids if not progress_seen else [], localize_message(str(exc))))
         else:
             self.panel.event_queue.put(("task-success", host, step_ids))
         finally:
@@ -307,7 +308,7 @@ class BaseTargetView:
             return
         if status == "error":
             self.current_step_id = None
-            self.set_step_state(step_id, "Ошибка", "Error.TLabel", _shorten(details))
+            self.set_step_state(step_id, "Ошибка", "Error.TLabel", _shorten(localize_message(details)))
             self.summary_var.set(self.error_running_text())
 
     def handle_success(self, step_ids: list[str]) -> None:
@@ -318,14 +319,14 @@ class BaseTargetView:
     def handle_error(self, step_ids: list[str], message: str) -> None:
         if step_ids:
             for step_id in step_ids:
-                self.set_step_state(step_id, "Ошибка", "Error.TLabel", _shorten(message))
-        self.summary_var.set(f"Ошибка: {_shorten(message)}")
+                self.set_step_state(step_id, "Ошибка", "Error.TLabel", _shorten(localize_message(message)))
+        self.summary_var.set(f"Ошибка: {_shorten(localize_message(message))}")
         self.current_step_id = None
         self.panel.set_tab_status(self.host, "error")
 
     def handle_cancel(self, step_id: str | None, message: str) -> None:
         if step_id:
-            self.set_step_state(step_id, "Отменено", "Cancelled.TLabel", _shorten(message))
+            self.set_step_state(step_id, "Отменено", "Cancelled.TLabel", _shorten(localize_message(message)))
         self.summary_var.set("Выполнение отменено пользователем.")
         self.current_step_id = None
         self.panel.set_tab_status(self.host, "cancel")
@@ -658,6 +659,8 @@ class DbRepairPanel(BasePanel):
 
 class MysqlRebuildTargetView(BaseTargetView):
     def __init__(self, panel: "BasePanel", notebook: ttk.Notebook, host: str):
+        self.source_server_var = tk.StringVar()
+        self._run_source_server: str | None = None
         super().__init__(
             panel, notebook, host, logger_name="dbrepair.mysql-rebuild", log_prefix="dbrepair-mysql-rebuild"
         )
@@ -673,6 +676,22 @@ class MysqlRebuildTargetView(BaseTargetView):
 
     def running_text(self) -> str:
         return "Пересборка MySQL..."
+
+    def _build_options(self, parent: ttk.Frame) -> None:
+        options_frame = ttk.LabelFrame(parent, text="Источник дистрибутивов UKM", padding=10)
+        options_frame.grid(row=0, column=0, sticky="ew")
+        options_frame.columnconfigure(1, weight=1)
+        ttk.Label(options_frame, text="Сервер UKM:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(options_frame, textvariable=self.source_server_var).grid(row=0, column=1, sticky="ew")
+        ttk.Label(
+            options_frame,
+            text="Необязательно. Если поле пусто, адрес определяется по rc.ukm или netstat.",
+            style="Hint.TLabel",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+    def start_worker(self, step_ids: list[str], *, reset: bool) -> bool:
+        self._run_source_server = self.source_server_var.get().strip() or None
+        return super().start_worker(step_ids, reset=reset)
 
     def run_step(self, step_id: str) -> bool:
         if step_id == "rebuild" and not messagebox.askyesno(
@@ -704,7 +723,14 @@ class MysqlRebuildTargetView(BaseTargetView):
         config = override_host(load_config(config_path), host)
         self.logger.info("Using config %s", config.source_path)
         self.logger.info("Target host %s", config.connection.host)
-        MysqlRebuildWorkflow(config, self.logger, cancel_event=cancel_event).run_steps(step_ids, progress=progress)
+        if self._run_source_server:
+            self.logger.info("UKM source server entered manually: %s", self._run_source_server)
+        MysqlRebuildWorkflow(
+            config,
+            self.logger,
+            cancel_event=cancel_event,
+            source_server=self._run_source_server,
+        ).run_steps(step_ids, progress=progress)
 
 
 class MysqlRebuildPanel(BasePanel):
@@ -862,7 +888,7 @@ class TsPiotTargetView(BaseTargetView):
             self.panel.event_queue.put(("detect", host, None, None, "Отменено пользователем."))
         except (ConfigError, RuntimeError, OSError, TimeoutError, ValueError, KeyError) as exc:
             self.logger.exception("Environment detection failed.")
-            self.panel.event_queue.put(("detect", host, None, None, str(exc)))
+            self.panel.event_queue.put(("detect", host, None, None, localize_message(str(exc))))
         finally:
             self.panel.event_queue.put(("busy", host, False))
 
@@ -915,7 +941,7 @@ class TsPiotTargetView(BaseTargetView):
             self.panel.event_queue.put(("reboot", host, False, "Отменено пользователем."))
         except (ConfigError, RuntimeError, OSError, TimeoutError, ValueError, KeyError) as exc:
             self.logger.exception("Reboot failed.")
-            self.panel.event_queue.put(("reboot", host, False, str(exc)))
+            self.panel.event_queue.put(("reboot", host, False, localize_message(str(exc))))
         finally:
             self.panel.event_queue.put(("busy", host, False))
 
@@ -1186,7 +1212,7 @@ class PublishPanel:
         try:
             config = load_config(config_path)
         except ConfigError as exc:
-            self.summary_var.set(f"Ошибка конфига: {_shorten(str(exc))}")
+            self.summary_var.set(f"Ошибка конфига: {_shorten(localize_message(str(exc)))}")
             return
         local_dir = config.distribution.local_dir if config.distribution is not None else None
         if local_dir is not None:
@@ -1279,7 +1305,7 @@ class PublishPanel:
             self.event_queue.put(("publish-result", result, None))
         except (PublishError, ConfigError, RuntimeError, OSError, ValueError) as exc:
             self.logger.exception("Publish failed.")
-            self.event_queue.put(("publish-result", None, str(exc)))
+            self.event_queue.put(("publish-result", None, localize_message(str(exc))))
         finally:
             self.event_queue.put(("publish-busy", False))
 

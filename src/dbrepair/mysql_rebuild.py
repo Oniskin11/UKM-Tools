@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import shlex
 import threading
 import uuid
-import shlex
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
+import re
 
 from .config import AppConfig
 from .remote import RemoteClient
@@ -22,10 +23,18 @@ ProgressCallback = Callable[[WorkflowStep, str, str | None], None]
 class MysqlRebuildWorkflow:
     """Controlled replacement for the legacy create_mysql.sh script."""
 
-    def __init__(self, config: AppConfig, logger, *, cancel_event: threading.Event | None = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        logger,
+        *,
+        cancel_event: threading.Event | None = None,
+        source_server: str | None = None,
+    ):
         self.config = config
         self.logger = logger
         self.cancel_event = cancel_event
+        self.source_server = _validate_source_server(source_server)
 
     def run_steps(self, step_ids: Sequence[str], *, progress: ProgressCallback | None = None) -> None:
         known_ids = {step.step_id for step in MYSQL_REBUILD_STEPS}
@@ -40,27 +49,153 @@ class MysqlRebuildWorkflow:
                 if progress:
                     progress(step, "running", None)
                 try:
-                    if step.step_id == "verify":
+                    if step.step_id == "rebuild":
+                        self._rebuild(remote)
+                    elif step.step_id == "verify":
                         self._verify_with_database_password(remote)
                     else:
-                        command = {
-                            "preflight": self._preflight_command,
-                            "rebuild": self._rebuild_command,
-                        }[step.step_id]()
-                        remote.run(
-                            command,
-                            timeout=900 if step.step_id == "rebuild" else 90,
-                            # The old POS login profile uses terminal commands.
-                            get_pty=step.step_id == "rebuild",
-                        )
-                    if step.step_id == "rebuild":
-                        self._apply_standard_grants(remote)
+                        remote.run(self._preflight_command(), timeout=90)
                 except Exception as exc:
                     if progress:
                         progress(step, "error", str(exc))
                     raise
                 if progress:
                     progress(step, "success", None)
+
+    def _rebuild(self, remote: RemoteClient) -> None:
+        """Пересобрать MySQL наблюдаемыми фазами с отдельными тайм-аутами."""
+        workdir = f"/tmp/dbrepair-mysql-rebuild-{uuid.uuid4().hex}"
+        recovery_required = False
+        try:
+            self._run_rebuild_phase(remote, "Подготовить архивы и чистый datadir", self._prepare_rebuild_command(workdir), 240)
+            recovery_required = True
+            self._run_rebuild_phase(remote, "Остановить ukmclient", "/etc/init.d/ukmclient stop", 90, get_pty=True)
+            self._run_rebuild_phase(remote, "Остановить MySQL", "/etc/init.d/mysql stop", 90, get_pty=True)
+            self._run_rebuild_phase(remote, "Заменить datadir и сохранить предыдущий", self._replace_datadir_command(workdir), 180)
+            self._run_rebuild_phase(remote, "Запустить MySQL", "/etc/init.d/mysql start", 90, get_pty=True)
+            self._run_rebuild_phase(remote, "Дождаться готовности MySQL", _mysql_ready_command(120), 130)
+            self._run_rebuild_phase(remote, "Загрузить схему UKM", self._import_schema_command(workdir), 600)
+            self._run_rebuild_phase(remote, "Загрузить версию UKM", self._import_version_command(workdir), 180)
+            self._run_rebuild_phase(remote, "Проверить схему UKM", self._schema_check_command(), 90)
+            self._apply_standard_grants(remote)
+            self._run_rebuild_phase(remote, "Запустить ukmclient", self._start_ukmclient_command(), 90, get_pty=True)
+        except Exception:
+            if recovery_required:
+                self.logger.warning("Пересборка прервана; выполняется возврат служб MySQL и ukmclient.")
+                self._restore_services(remote)
+            raise
+        finally:
+            try:
+                remote.run(f"rm -rf {shlex.quote(workdir)}", check=False, timeout=60)
+            except Exception:
+                self.logger.warning("Не удалось удалить временный каталог пересборки MySQL: %s", workdir)
+
+    def _run_rebuild_phase(self, remote: RemoteClient, title: str, command: str, timeout: int, *, get_pty: bool = False) -> None:
+        self.logger.info("Фаза пересборки MySQL: %s", title)
+        try:
+            remote.run(command, timeout=timeout, get_pty=get_pty)
+        except TimeoutError as exc:
+            raise WorkflowError(f"Истекло время ожидания фазы «{title}» ({timeout} с).") from exc
+
+    def _restore_services(self, remote: RemoteClient) -> None:
+        for command, service in (
+            ("/etc/init.d/mysql start || true", "MySQL"),
+            ("TERM=linux /etc/init.d/ukmclient start || true", "ukmclient"),
+        ):
+            try:
+                remote.run(command, check=False, timeout=90, get_pty=True)
+            except Exception as exc:
+                self.logger.warning("Не удалось вернуть службу %s после ошибки пересборки: %s", service, exc)
+
+    def _prepare_rebuild_command(self, workdir: str) -> str:
+        return f'''set -eu
+RC=/usr/local/ukmclient/rc.ukm
+WORK={shlex.quote(workdir)}
+''' + self._source_server_resolver() + r'''
+rm -rf "$WORK"
+mkdir -p "$WORK"
+resolve_source_server
+cd "$WORK"
+echo "Загрузка дистрибутивов с http://$server/ukminstall"
+wget -q --timeout=30 --tries=2 -O ukmcli-build.tgz "http://$server/ukminstall/ukmcli-build.tgz"
+wget -q --timeout=30 --tries=2 -O ukm-root.tar.gz "http://$server/ukminstall/ukm-root.tar.gz"
+test -s ukmcli-build.tgz
+test -s ukm-root.tar.gz
+tar tzf ukmcli-build.tgz >/dev/null
+tar tzf ukm-root.tar.gz >/dev/null
+if tar tzf ukmcli-build.tgz | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then echo 'Unsafe build archive' >&2; exit 2; fi
+if tar tzf ukm-root.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then echo 'Unsafe root archive' >&2; exit 2; fi
+tar xzf ukmcli-build.tgz
+tar xzf ukm-root.tar.gz
+NEW_VAR=$(find "$WORK" -type d -path '*/usr/local/mysql*/var' -print | sed -n '1p')
+SCHEMA_DUMP=$(find "$WORK" -type f -name 'ukm.sql' -print | sed -n '1p')
+VERSION_DUMP=$(find "$WORK" -type f -name 'setver.sql' -print | sed -n '1p')
+test -n "$NEW_VAR"
+test -f "$NEW_VAR/ibdata1" -o -d "$NEW_VAR/mysql"
+test -s "$SCHEMA_DUMP"
+test -s "$VERSION_DUMP"
+printf '%s\n' "$NEW_VAR" > "$WORK/new_var"
+printf '%s\n' "$SCHEMA_DUMP" > "$WORK/schema_dump"
+printf '%s\n' "$VERSION_DUMP" > "$WORK/version_dump"
+echo 'Архивы проверены и распакованы'
+'''
+
+    def _replace_datadir_command(self, workdir: str) -> str:
+        return f'''set -eu
+MYSQL_DIR=/usr/local/mysql
+VAR_DIR=/usr/local/mysql/var
+WORK={shlex.quote(workdir)}
+NEW_VAR=$(cat "$WORK/new_var")
+test -d "$NEW_VAR"
+i=0
+while test -e "$MYSQL_DIR/var_bad$i"; do i=$((i + 1)); done
+BACKUP="$MYSQL_DIR/var_bad$i"
+mv "$VAR_DIR" "$BACKUP"
+cp -a "$NEW_VAR" "$VAR_DIR"
+printf '%s\\n' "$BACKUP" > "$WORK/previous_datadir"
+echo "Предыдущий datadir сохранён: $BACKUP"
+'''
+
+    def _import_schema_command(self, workdir: str) -> str:
+        database_name = shlex.quote(self.config.database.name)
+        return f'''set -eu
+WORK={shlex.quote(workdir)}
+DB_NAME={database_name}
+SCHEMA_DUMP=$(cat "$WORK/schema_dump")
+test -s "$SCHEMA_DUMP"
+mysql -e "CREATE DATABASE IF NOT EXISTS \\`$DB_NAME\\` CHARACTER SET utf8 COLLATE utf8_general_ci"
+mysql "$DB_NAME" < "$SCHEMA_DUMP"
+echo "Схема UKM загружена из $SCHEMA_DUMP"
+'''
+
+    def _import_version_command(self, workdir: str) -> str:
+        database_name = shlex.quote(self.config.database.name)
+        return f'''set -eu
+WORK={shlex.quote(workdir)}
+DB_NAME={database_name}
+VERSION_DUMP=$(cat "$WORK/version_dump")
+test -s "$VERSION_DUMP"
+mysql "$DB_NAME" < "$VERSION_DUMP"
+echo "Версия UKM загружена из $VERSION_DUMP"
+'''
+
+    def _schema_check_command(self) -> str:
+        database_name = shlex.quote(self.config.database.name)
+        return f'''set -eu
+DB_NAME={database_name}
+mysql "$DB_NAME" -N -e "SHOW TABLES LIKE 'trm_in_store'" | grep -Fx trm_in_store >/dev/null
+TABLE_COUNT=$(mysql "$DB_NAME" -N -e 'SHOW TABLES' | wc -l | tr -d '[:space:]')
+test "$TABLE_COUNT" -ge 100 || {{ echo "UKM schema is incomplete: only $TABLE_COUNT tables" >&2; exit 1; }}
+echo "Схема UKM проверена: $TABLE_COUNT таблиц"
+'''
+
+    @staticmethod
+    def _start_ukmclient_command() -> str:
+        return """set -eu
+TERM=linux /etc/init.d/ukmclient start
+i=0; while [ \"$i\" -lt 30 ]; do pgrep -f '/usr/local/ukmclient/ukmstart.sh' >/dev/null 2>&1 && exit 0; sleep 1; i=$((i + 1)); done
+echo 'ukmclient did not start' >&2
+exit 1"""
 
     def _verify_with_database_password(self, remote: RemoteClient) -> None:
         """Verify MySQL through a temporary client file so the password never reaches logs."""
@@ -181,16 +316,22 @@ echo "UKM schema restored: $TABLE_COUNT tables"
 echo "Previous datadir kept at $BACKUP"
 """
 
-    @staticmethod
-    def _source_server_resolver() -> str:
+    def _source_server_resolver(self) -> str:
         """Return POS shell code that finds the UKM package source without executing rc.ukm."""
-        return r"""
+        configured_server = shlex.quote(self.source_server) if self.source_server else "''"
+        return f"""manual_server={configured_server}
+""" + r"""
 resolve_source_server() {
     server=
     source_method=
+    # Manual value is necessary when MySQL is stopped and netstat has no peer.
+    if test -n "$manual_server"; then
+        server=$manual_server
+        source_method='manual input'
+    fi
     # Old POS images can contain a plain server= line.  Do not source rc.ukm:
     # it may execute terminal-specific commands in a non-interactive shell.
-    if test -r "$RC"; then
+    if test -z "${server:-}" && test -r "$RC"; then
         server=$(awk -F= '/^[[:space:]]*server[[:space:]]*=/ { print $2; exit }' "$RC" | tr -d '[:space:]"')
         if test -n "${server:-}"; then source_method="rc.ukm"; fi
     fi
@@ -232,3 +373,25 @@ exit 1"""
 
 def _sql_literal(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _mysql_ready_command(seconds: int) -> str:
+    return f'''set -eu
+i=0
+while [ "$i" -lt {seconds} ]; do
+    mysqladmin ping --silent >/dev/null 2>&1 && exit 0
+    sleep 1
+    i=$((i + 1))
+done
+echo 'MySQL did not become ready in time' >&2
+exit 1
+'''
+
+
+def _validate_source_server(value: str | None) -> str | None:
+    candidate = (value or "").strip()
+    if not candidate:
+        return None
+    if not re.fullmatch(r"[0-9A-Za-z._:-]+", candidate):
+        raise ValueError("Адрес сервера UKM должен содержать только имя хоста, IP-адрес и необязательный порт.")
+    return candidate
