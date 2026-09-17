@@ -45,7 +45,7 @@ class MysqlRebuildTests(unittest.TestCase):
         remote = Remote()
         self.workflow._rebuild(remote)
         commands = [command for command, _kwargs in remote.commands]
-        self.assertGreaterEqual(len(commands), 14)
+        self.assertGreaterEqual(len(commands), 15)
         self.assertIn('wget -q --timeout=30 --tries=2', commands[0])
         self.assertEqual(remote.commands[0][1]["timeout"], 300)
         self.assertIn("tar xzf ukmcli-build.tgz", commands[1])
@@ -59,11 +59,18 @@ class MysqlRebuildTests(unittest.TestCase):
         self.assertEqual('/etc/init.d/mysql stop', commands[4])
         self.assertIn('mv "$VAR_DIR" "$BACKUP"', commands[5])
         self.assertEqual('/etc/init.d/mysql start', commands[6])
+        self.assertEqual(remote.commands[6][1]["timeout"], 300)
+        self.assertIn('_mysql_ready_command', MysqlRebuildWorkflow._rebuild.__code__.co_names)
         self.assertIn('mysql "$DB_NAME" < "$SCHEMA_DUMP"', commands[8])
+        self.assertIn('CHARACTER SET latin1 COLLATE latin1_swedish_ci', commands[8])
         self.assertIn('mysql "$DB_NAME" < "$VERSION_DUMP"', commands[9])
         self.assertIn("SHOW TABLES LIKE 'trm_in_store'", commands[10])
-        self.assertIn("GRANT ALL ON *.* TO root@'localhost'", remote.written[0][1])
-        self.assertIn('TERM=linux /etc/init.d/ukmclient start', commands[-2])
+        self.assertIn("GRANT ALL PRIVILEGES ON \\`$DB_NAME\\`.*", commands[11])
+        self.assertIn('read_rc_value() { grep "^$1=" "$RC"', commands[11])
+        self.assertNotIn(self.config.database.password, commands[11])
+        self.assertIn('TERM=linux /etc/init.d/ukmclient start', commands[12])
+        self.assertIn('mysql --defaults-extra-file="$CLIENT_FILE" -D "$DB_NAME"', commands[13])
+        self.assertIn('pidof cashmain', commands[13])
         self.assertIn('rm -rf /tmp/dbrepair-mysql-rebuild-', commands[-1])
 
     def test_phase_timeout_names_the_stuck_phase(self) -> None:
@@ -98,7 +105,7 @@ class MysqlRebuildTests(unittest.TestCase):
         self.assertIn(f"--defaults-extra-file={path}", remote.commands[1][0])
         self.assertIn("SHOW TABLES LIKE 'trm_in_store'", remote.commands[1][0])
         self.assertIn("TERM=linux /etc/init.d/ukmclient start", remote.commands[1][0])
-        self.assertIn("pgrep -f '/usr/local/ukmclient/ukmstart.sh'", remote.commands[1][0])
+        self.assertIn("pidof cashmain", remote.commands[1][0])
         self.assertTrue(remote.commands[1][1]["get_pty"])
         self.assertNotIn(self.config.database.password, remote.commands[1][0])
         self.assertIn(f"rm -f {path}", remote.commands[2][0])
@@ -109,6 +116,8 @@ class MysqlRebuildTests(unittest.TestCase):
         self.assertIn('fail() { echo "Preflight failed: $1" >&2; exit 1; }', command)
         self.assertIn('cannot download ukm-root.tar.gz from $server', command)
         self.assertIn('ukmcli-build.tgz does not contain ukm.sql', command)
+        self.assertIn('mysqld is waiting for disk I/O (D state)', command)
+        self.assertIn("ps -o stat= -C mysqld", command)
         self.assertIn("awk -F=", command)
         self.assertIn("netstat -tn", command)
         self.assertIn('no established remote MySQL peer was found by netstat', command)
@@ -127,23 +136,25 @@ class MysqlRebuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Адрес сервера UKM"):
             MysqlRebuildWorkflow(self.config, Logger(), source_server="server; rm -rf /")
 
-    def test_grants_are_sent_as_a_temporary_file(self) -> None:
-        class Remote:
-            def __init__(self) -> None:
-                self.written: list[tuple[str, str]] = []
-                self.commands: list[str] = []
+    def test_restore_account_uses_rc_ukm_and_scoped_privileges(self) -> None:
+        command = self.workflow._restore_ukm_database_account_command()
+        self.assertIn('RC=/usr/local/ukmclient/rc.ukm', command)
+        self.assertIn('read_rc_value() { grep "^$1=" "$RC"', command)
+        self.assertIn("GRANT ALL PRIVILEGES ON \\`$DB_NAME\\`.*", command)
+        self.assertIn('WITH GRANT OPTION', command)
+        self.assertIn('GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.*', command)
+        self.assertIn('GRANT RELOAD ON *.*', command)
+        self.assertNotIn('DELETE FROM mysql.', command)
+        self.assertNotIn(self.config.database.password, command)
 
-            def write_text(self, path: str, content: str) -> None:
-                self.written.append((path, content))
-
-            def run(self, command: str, **kwargs) -> None:
-                del kwargs
-                self.commands.append(command)
-
-        remote = Remote()
-        self.workflow._apply_standard_grants(remote)
-        self.assertIn("GRANT ALL ON *.* TO root@'localhost'", remote.written[0][1])
-        self.assertNotIn(self.config.database.password, remote.commands[0])
+    def test_verify_account_uses_private_file_and_cashmain(self) -> None:
+        command = self.workflow._verify_ukm_database_account_command()
+        self.assertIn('mktemp /tmp/.dbrepair-ukm-client.XXXXXX', command)
+        self.assertIn('mysql --defaults-extra-file="$CLIENT_FILE" -D "$DB_NAME"', command)
+        self.assertIn("SHOW TABLES LIKE 'trm_in_store'", command)
+        self.assertIn('SELECT User FROM mysql.db', command)
+        self.assertIn('pidof cashmain', command)
+        self.assertNotIn(self.config.database.password, command)
 
 
 if __name__ == "__main__":
