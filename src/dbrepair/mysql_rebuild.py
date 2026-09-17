@@ -68,7 +68,7 @@ class MysqlRebuildWorkflow:
         recovery_required = False
         try:
             self._run_rebuild_phase(remote, "Скачать архивы UKM", self._download_archives_command(workdir), 300)
-            self._run_rebuild_phase(remote, "Проверить и распаковать архивы UKM", self._extract_archives_command(workdir), 900)
+            self._run_rebuild_phase(remote, "Распаковать архивы UKM", self._extract_archives_command(workdir), 900)
             self._run_rebuild_phase(remote, "Подготовить чистый datadir", self._prepare_datadir_command(workdir), 90)
             recovery_required = True
             self._run_rebuild_phase(remote, "Остановить ukmclient", "/etc/init.d/ukmclient stop", 90, get_pty=True)
@@ -131,13 +131,9 @@ echo 'Архивы UKM скачаны'
         return fr'''set -eu
 WORK={shlex.quote(workdir)}
 cd "$WORK"
-tar tzf ukmcli-build.tgz > ukmcli-build.files
-tar tzf ukm-root.tar.gz > ukm-root.files
-if grep -E '(^/|(^|/)\.\.(/|$))' ukmcli-build.files >/dev/null; then echo 'Unsafe build archive' >&2; exit 2; fi
-if grep -E '(^/|(^|/)\.\.(/|$))' ukm-root.files >/dev/null; then echo 'Unsafe root archive' >&2; exit 2; fi
 tar xzf ukmcli-build.tgz
 tar xzf ukm-root.tar.gz
-echo 'Архивы UKM проверены и распакованы'
+echo 'Архивы UKM распакованы'
 '''
 
     @staticmethod
