@@ -48,6 +48,20 @@ def _last_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+def _valid_owner_or_default(owner: str, default_owner: str) -> str:
+    """Return a usable name:group pair, falling back after a POS reinstall.
+
+    ``stat -c %U:%G`` prints ``UNKNOWN:UNKNOWN`` for orphaned numeric ids.
+    Such a value cannot be passed back to chown.  The installation directory
+    owner is the safe, configured fallback for a freshly installed POS.
+    """
+    if owner.upper() != "UNKNOWN:UNKNOWN" and re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_.-]*:[A-Za-z_][A-Za-z0-9_.-]*", owner
+    ):
+        return owner
+    return default_owner
+
+
 def _detect_on(
     remote: RemoteClient,
     logger,
@@ -267,7 +281,16 @@ class TsPiotInstaller:
         if existing:
             # Права и владелец снимаются заранее, чтобы вернуть их после замены (mv меняет inode).
             mode = _last_line(remote.run(f"stat -c %a {shlex.quote(existing)}", use_sudo=True, check=False).stdout)
-            owner = _last_line(remote.run(f"stat -c %U:%G {shlex.quote(existing)}", use_sudo=True, check=False).stdout)
+            detected_owner = _last_line(
+                remote.run(f"stat -c %U:%G {shlex.quote(existing)}", use_sudo=True, check=False).stdout
+            )
+            owner = _valid_owner_or_default(detected_owner, self.owner)
+            if owner != detected_owner:
+                self.logger.warning(
+                    "Driver owner %r is unavailable; using target owner %s.",
+                    detected_owner or "<empty>",
+                    owner,
+                )
             target_so = existing
         else:
             mode = "0644"
