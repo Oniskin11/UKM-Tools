@@ -11,7 +11,7 @@ from dbrepair.config import (
 )
 from dbrepair.remote import CommandResult
 from dbrepair.distsource import Artifact
-from dbrepair.tspiot import TsPiotInstaller, _last_line
+from dbrepair.tspiot import TsPiotInstaller, _last_line, _valid_owner_or_default
 
 
 def test_last_line_ignores_banner_noise():
@@ -23,6 +23,12 @@ def test_last_line_ignores_banner_noise():
 def test_resolve_owner_from_target():
     assert TsPiotConfig().resolve_owner("/usr/local/lillo") == "lillo:lillo"
     assert TsPiotConfig(owner="root:root").resolve_owner("/usr/local/ukmclient") == "root:root"
+
+
+def test_unknown_driver_owner_uses_target_owner():
+    assert _valid_owner_or_default("UNKNOWN:UNKNOWN", "ukmclient:ukmclient") == "ukmclient:ukmclient"
+    assert _valid_owner_or_default("", "ukmclient:ukmclient") == "ukmclient:ukmclient"
+    assert _valid_owner_or_default("root:root", "ukmclient:ukmclient") == "root:root"
 
 
 def _make_installer(source):
