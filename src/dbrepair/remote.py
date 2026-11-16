@@ -47,10 +47,12 @@ class RemoteClient:
         logger,
         *,
         cancel_event: threading.Event | None = None,
+        login_shell: bool = True,
     ):
         self.config = config
         self.logger = logger
         self.cancel_event = cancel_event
+        self.login_shell = login_shell
         self._client: Any | None = None
         self._sftp: Any | None = None
 
@@ -231,9 +233,17 @@ class RemoteClient:
 
         self._require_sftp().put(str(local_path), remote_path, callback=self._transfer_callback)
 
-    def write_private_text(self, remote_path: str, content: str) -> None:
+    def write_private_text(self, remote_path: str, content: str, *, use_sudo: bool = False) -> None:
         """Create a new credentials file with mode 0600 before writing secrets."""
         self._raise_if_cancelled()
+        if use_sudo and self.config.use_sudo:
+            temp_path = self._temporary_remote_file("credentials")
+            self.write_private_text(temp_path, content)
+            try:
+                self.run(f"install -m 0600 {shlex.quote(temp_path)} {shlex.quote(remote_path)}", use_sudo=True, timeout=30)
+            finally:
+                self.run(f"rm -f {shlex.quote(temp_path)}", check=False, timeout=30)
+            return
         with self._require_sftp().file(remote_path, mode="wx") as remote_file:
             remote_file.chmod(0o600)
             remote_file.write(content.encode("utf-8"))
@@ -274,7 +284,8 @@ class RemoteClient:
     def _wrap_command(self, command: str, *, cwd: str | None, use_sudo: bool) -> str:
         if cwd:
             command = f"cd {shlex.quote(cwd)} && {command}"
-        shell_command = f"/bin/sh -lc {shlex.quote(command)}"
+        shell_command = (f"/bin/sh -lc {shlex.quote(command)}" if self.login_shell
+                         else f"TERM=linux /bin/sh -c {shlex.quote(command)}")
         if use_sudo and self.config.use_sudo:
             return f"sudo -S -p '' {shell_command}"
         return shell_command

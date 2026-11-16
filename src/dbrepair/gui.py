@@ -672,7 +672,7 @@ class MysqlRebuildTargetView(BaseTargetView):
         return "Пересобрать MySQL"
 
     def ready_text(self) -> str:
-        return "Можно проверить источник, пересобрать MySQL или проверить результат."
+        return "После обрыва выберите шаг 2+ «Продолжить»: готовый datadir и файлы InnoDB сохранятся."
 
     def running_text(self) -> str:
         return "Пересборка MySQL..."
@@ -713,7 +713,7 @@ class MysqlRebuildTargetView(BaseTargetView):
             parent=self.frame.winfo_toplevel(),
         ):
             return False
-        return self.start_worker([step.step_id for step in MYSQL_REBUILD_STEPS], reset=True)
+        return self.start_worker([step.step_id for step in MYSQL_REBUILD_STEPS if step.step_id != "resume"], reset=True)
 
     def success_summary(self, step_ids: list[str]) -> str:
         del step_ids

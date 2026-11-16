@@ -6,11 +6,12 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from dbrepair.config import AppConfig, ConnectionConfig, DatabaseConfig, ServiceCommands, WorkflowPaths
-from dbrepair.mysql_rebuild import MysqlRebuildWorkflow, _mysql_ready_command, _mysql_io_guard
+from dbrepair.mysql_rebuild import MysqlRebuildWorkflow, RebuildPausedError, _mysql_ready_command, _mysql_io_guard
 from dbrepair.remote import CommandResult, RemoteClient
 from dbrepair.workflow import WorkflowError
 
@@ -19,6 +20,7 @@ class Remote:
     def __init__(self, results=()):
         self.commands = []
         self.written = []
+        self.scripts = []
         self.results = iter(results)
         self.cancel_event = None
 
@@ -26,10 +28,15 @@ class Remote:
         self.commands.append((command, kwargs))
         if "-e 'SELECT 1'" in command:
             return next(self.results, CommandResult(command, 0, '1\n', ''))
+        if command.startswith('JOB='):
+            return CommandResult(command, 0, 'MYSQL_READY\n' if 'mysql-start' in command else 'JOB_EXIT=0\n', '')
         return CommandResult(command, 0, '', '')
 
-    def write_private_text(self, path, content):
+    def write_private_text(self, path, content, **kwargs):
         self.written.append((path, content))
+
+    def write_text(self, path, content, **kwargs):
+        self.scripts.append((path, content))
 
 
 class MysqlRebuildTests(unittest.TestCase):
@@ -62,11 +69,11 @@ class MysqlRebuildTests(unittest.TestCase):
         remote = Remote()
         self.workflow._rebuild(remote)
         commands = [c for c, _ in remote.commands]
-        self.assertIn('id -u', commands[0])
+        self.assertTrue(any('id -u' in c for c in commands))
         self.assertTrue(all(kwargs['use_sudo'] for _, kwargs in remote.commands))
         client = remote.written[0][0]
         for marker in ('< "$SCHEMA_DUMP"', '< "$VERSION_DUMP"', 'GRANT ALL PRIVILEGES', 'DEFAULT_CHARACTER_SET_NAME'):
-            self.assertIn(f'--defaults-file={client}', next(c for c in commands if marker in c))
+            self.assertIn(f'--defaults-file={client}', next(c for c in commands + [s for _,s in remote.scripts] if marker in c))
         self.assertNotIn('mysql-secret', '\n'.join(commands))
         self.assertNotIn('ssh-secret', '\n'.join(commands))
         self.assertTrue(commands[-1].startswith('rm -rf /tmp/dbrepair-mysql-rebuild-'))
@@ -115,12 +122,12 @@ class MysqlRebuildTests(unittest.TestCase):
         remote = Remote()
         original = remote.run
         def run(command, **kwargs):
-            if command == self.config.services.mysql_start:
+            if 'mv "$VAR_DIR" "$BACKUP"' in command:
                 raise TimeoutError('disk blocked')
             return original(command, **kwargs)
         remote.run = run
         self.workflow._restore_services = Mock(return_value=False)
-        with self.assertRaisesRegex(WorkflowError, 'Запустить MySQL'):
+        with self.assertRaisesRegex(WorkflowError, 'Заменить datadir'):
             self.workflow._rebuild(remote)
         self.workflow._restore_services.assert_called_once()
         self.assertFalse(any(c.startswith('rm -rf /tmp/dbrepair-mysql-rebuild-') for c,_ in remote.commands))
