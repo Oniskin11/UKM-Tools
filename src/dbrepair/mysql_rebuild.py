@@ -6,19 +6,27 @@ import uuid
 from contextlib import contextmanager
 from collections.abc import Callable, Sequence
 import re
+import time
 
 from .config import AppConfig
-from .remote import RemoteClient
+from .remote import RemoteClient, OperationCancelledError
 from .workflow import WorkflowError, WorkflowStep
 
 
 MYSQL_REBUILD_STEPS: tuple[WorkflowStep, ...] = (
     WorkflowStep("preflight", "1", "Проверить кассу и дистрибутивы на сервере UKM"),
     WorkflowStep("rebuild", "2", "Пересобрать чистый datadir и загрузить базу UKM"),
+    WorkflowStep("resume", "2+", "Продолжить прерванную пересборку без замены datadir"),
     WorkflowStep("verify", "3", "Проверить MySQL, схему UKM и запуск ukmclient"),
 )
 
 ProgressCallback = Callable[[WorkflowStep, str, str | None], None]
+CHECKPOINT = "/usr/local/mysql/.dbrepair-rebuild"
+PHASES = ("datadir_ready", "mysql_ready", "schema_importing", "schema_imported", "version_importing", "version_imported", "verified")
+
+
+class RebuildPausedError(WorkflowError):
+    """The remote operation must be preserved for a later resume, not rolled back."""
 
 
 class MysqlRebuildWorkflow:
@@ -45,8 +53,9 @@ class MysqlRebuildWorkflow:
         if not step_ids or unknown:
             raise WorkflowError(f"Unknown MySQL rebuild steps: {', '.join(sorted(unknown)) or 'empty plan'}.")
 
-        with RemoteClient(self.config.connection, self.logger, cancel_event=self.cancel_event) as remote:
-            selected = [step for step in MYSQL_REBUILD_STEPS if step.step_id in step_ids]
+        with RemoteClient(self.config.connection, self.logger, cancel_event=self.cancel_event, login_shell=False) as remote:
+            selected = [step for step in MYSQL_REBUILD_STEPS if step.step_id in step_ids
+                        and not (step.step_id == "resume" and "rebuild" in step_ids)]
             for step in selected:
                 self.logger.info("Step %s: %s", step.number, step.title)
                 if progress:
@@ -54,8 +63,13 @@ class MysqlRebuildWorkflow:
                 try:
                     if step.step_id == "rebuild":
                         self._rebuild(remote)
+                    elif step.step_id == "resume":
+                        self._resume(remote)
                     elif step.step_id == "verify":
-                        self._verify_with_database_password(remote)
+                        if self._checkpoint_path(remote):
+                            self._resume(remote)
+                        else:
+                            self._verify_with_database_password(remote)
                     else:
                         remote.run(self._preflight_command(), timeout=90, use_sudo=True)
                 except Exception as exc:
@@ -67,8 +81,11 @@ class MysqlRebuildWorkflow:
 
     def _rebuild(self, remote: RemoteClient) -> None:
         """Пересобрать MySQL наблюдаемыми фазами с отдельными тайм-аутами."""
+        if self._checkpoint_path(remote):
+            raise WorkflowError("Найдена незавершённая пересборка. Нажмите «Продолжить прерванную пересборку»; повторная замена datadir запрещена.")
         workdir = f"/tmp/dbrepair-mysql-rebuild-{uuid.uuid4().hex}"
         recovery_required = False
+        datadir_replaced = False
         completed = False
         try:
             self._run_rebuild_phase(remote, "Проверить кассу перед пересборкой", self._preflight_command(), 90)
@@ -79,25 +96,20 @@ class MysqlRebuildWorkflow:
             self._run_rebuild_phase(remote, "Остановить ukmclient", self.config.services.ukmclient_stop, 90, get_pty=True)
             self._run_rebuild_phase(remote, "Остановить MySQL", self._stop_mysql_command(), 90, get_pty=True)
             self._run_rebuild_phase(remote, "Заменить datadir и сохранить предыдущий", self._replace_datadir_command(workdir), 180)
-            self._run_rebuild_phase(remote, "Запустить MySQL", self.config.services.mysql_start, 300, get_pty=True)
-            self._run_rebuild_phase(remote, "Дождаться готовности MySQL", _mysql_ready_command(300), 310)
-            with self._mysql_credentials(remote) as client:
-                self._run_rebuild_phase(remote, "Загрузить схему UKM", self._import_schema_command(workdir, client), 600)
-                self._run_rebuild_phase(remote, "Загрузить версию UKM", self._import_version_command(workdir, client), 180)
-                self._run_rebuild_phase(remote, "Проверить схему UKM", self._schema_check_command(client), 90)
-                self._run_rebuild_phase(remote, "Восстановить доступ UKM к MySQL", self._restore_ukm_database_account_command(client), 90)
-            self._run_rebuild_phase(remote, "Проверить вход UKM", self._verify_ukm_database_account_command(check_process=False), 30)
-            self._run_rebuild_phase(remote, "Запустить ukmclient", self._start_ukmclient_command(), 90, get_pty=True)
-            self._run_rebuild_phase(
-                remote,
-                "Проверить подключение UKM к MySQL",
-                self._verify_ukm_database_account_command(),
-                90,
-            )
+            datadir_replaced = True
+            self._finish_rebuild(remote, workdir, "datadir_ready")
             completed = True
+        except (RebuildPausedError, OperationCancelledError):
+            # Closing the GUI or a slow disk is not permission to stop InnoDB.
+            self.logger.warning("Пересборка приостановлена. MySQL не останавливается; нажмите «Продолжить» после восстановления связи. Рабочий каталог: %s", workdir)
+            if recovery_required and not datadir_replaced:
+                completed = self._restore_services(remote, workdir)
+            raise
         except Exception:
             self._diagnose_mysql(remote)
-            if recovery_required:
+            if datadir_replaced:
+                self.logger.warning("Ошибка после замены datadir: этап сохранён для продолжения. Работа InnoDB не прерывается; каталог %s", workdir)
+            elif recovery_required:
                 self.logger.warning("Пересборка прервана; выполняется возврат предыдущего datadir и служб.")
                 completed = self._restore_services(remote, workdir)
             raise
@@ -110,10 +122,142 @@ class MysqlRebuildWorkflow:
             else:
                 self.logger.warning("Данные для диагностики и отката сохранены в %s", workdir)
 
+    def _checkpoint_path(self, remote: RemoteClient) -> str | None:
+        result = remote.run(f"if test -f {CHECKPOINT}; then printf 'DBREPAIR_WORK='; cat {CHECKPOINT}; fi",
+                            timeout=30, use_sudo=True, get_pty=True)
+        matches = re.findall(r"DBREPAIR_WORK=(/tmp/dbrepair-mysql-rebuild-[0-9a-f]{32})\r?$", result.stdout, re.M)
+        if "DBREPAIR_WORK=" in result.stdout and not matches:
+            raise WorkflowError("Некорректная контрольная точка пересборки; проверьте " + CHECKPOINT)
+        return matches[0] if matches else None
+
+    def _save_phase(self, remote: RemoteClient, workdir: str, phase: str) -> None:
+        if phase not in PHASES:
+            raise ValueError(phase)
+        remote.run(f"printf '%s\\n' {phase} > {shlex.quote(workdir + '/phase.tmp')} && "
+                   f"mv {shlex.quote(workdir + '/phase.tmp')} {shlex.quote(workdir + '/phase')}",
+                   timeout=30, use_sudo=True, get_pty=True)
+
+    def _resume(self, remote: RemoteClient) -> None:
+        workdir = self._checkpoint_path(remote)
+        if not workdir:
+            raise WorkflowError("Нет сохранённой пересборки. Для старых версий без контрольной точки требуется проверить datadir и путь к дампам вручную.")
+        result = remote.run(f'''set -eu
+WORK={shlex.quote(workdir)}
+test "$(cat "$WORK/database")" = {shlex.quote(self.config.database.name)}
+test "$(cat "$WORK/datadir_identity")" = "$(stat -c '%d:%i' /usr/local/mysql/var)" || {{ echo 'Datadir изменён после обрыва; продолжение запрещено' >&2; exit 1; }}
+test -s "$WORK/schema_dump" && test -s "$WORK/version_dump"
+printf 'DBREPAIR_PHASE='; cat "$WORK/phase"
+''', timeout=30, use_sudo=True, get_pty=True)
+        phases = re.findall(r"DBREPAIR_PHASE=([a-z_]+)\r?$", result.stdout, re.M)
+        if not phases or phases[0] not in PHASES:
+            raise WorkflowError("Неизвестный сохранённый этап. Данные и резервная копия оставлены без изменений.")
+        self.logger.info("Продолжение пересборки из %s, этап %s. Datadir повторно не заменяется.", workdir, phases[0])
+        self._finish_rebuild(remote, workdir, phases[0])
+        remote.run(f"rm -rf {shlex.quote(workdir)}", timeout=60, use_sudo=True, get_pty=True)
+
+    def _finish_rebuild(self, remote: RemoteClient, workdir: str, phase: str) -> None:
+        if phase == "datadir_ready":
+            self._start_mysql_background(remote, workdir)
+            self._wait_remote_job(remote, workdir, "mysql-start", "Запуск MySQL / создание InnoDB", 7200, mysql_start=True)
+            self._save_phase(remote, workdir, "mysql_ready")
+            phase = "mysql_ready"
+        with self._mysql_credentials(remote, credential_dir=workdir) as client:
+            for before, during, after, tag, title, command in (
+                ("mysql_ready", "schema_importing", "schema_imported", "schema", "Импорт схемы UKM", self._import_schema_command(workdir, client)),
+                ("schema_imported", "version_importing", "version_imported", "version", "Импорт версии UKM", self._import_version_command(workdir, client)),
+            ):
+                if phase == before:
+                    self._launch_remote_job(remote, workdir, tag, command)
+                    self._save_phase(remote, workdir, during)
+                    phase = during
+                if phase == during:
+                    # Reattach to the saved job; never replay CREATE TABLE on a partial DB.
+                    self._wait_remote_job(remote, workdir, tag, title, 1800)
+                    self._save_phase(remote, workdir, after)
+                    phase = after
+            self._run_rebuild_phase(remote, "Проверить схему UKM", self._schema_check_command(client), 90)
+            self._run_rebuild_phase(remote, "Восстановить доступ UKM к MySQL", self._restore_ukm_database_account_command(client), 90)
+        self._run_rebuild_phase(remote, "Проверить вход UKM", self._verify_ukm_database_account_command(check_process=False), 30)
+        self._run_rebuild_phase(remote, "Запустить ukmclient", self._start_ukmclient_command(), 90, get_pty=True)
+        self._run_rebuild_phase(remote, "Проверить подключение UKM к MySQL", self._verify_ukm_database_account_command(), 90)
+        self._save_phase(remote, workdir, "verified")
+        remote.run(f"rm -f {CHECKPOINT}", timeout=30, use_sudo=True, get_pty=True)
+
+    def _launch_remote_job(self, remote: RemoteClient, workdir: str, tag: str, command: str) -> None:
+        job = workdir + "/" + tag
+        # The outer shell records status even when the inner script uses set -e.
+        script = f"/bin/sh -c {shlex.quote(command)}\nrc=$?\nprintf '%s\\n' \"$rc\" > {shlex.quote(job + '.exit.tmp')}\nmv {shlex.quote(job + '.exit.tmp')} {shlex.quote(job + '.exit')}\n"
+        remote.write_text(job + ".new.sh", script, use_sudo=True)
+        try:
+            remote.run(f'''set -eu
+umask 077
+if mkdir {shlex.quote(job + '.lock')} 2>/dev/null; then
+    mv {shlex.quote(job + '.new.sh')} {shlex.quote(job + '.sh')}
+    nohup /bin/sh {shlex.quote(job + '.sh')} </dev/null >{shlex.quote(job + '.log')} 2>&1 &
+    printf '%s\\n' "$!" > {shlex.quote(job + '.pid')}
+else
+    rm -f {shlex.quote(job + '.new.sh')}
+fi
+''', timeout=30, use_sudo=True, get_pty=False)
+        except Exception as exc:
+            raise RebuildPausedError("Не удалось подтвердить запуск удалённой операции. Состояние сохранено; используйте «Продолжить».") from exc
+
+    def _start_mysql_background(self, remote: RemoteClient, workdir: str) -> None:
+        # Starting an init script on a PTY made SSH timeouts interrupt live InnoDB.
+        command = "if pidof mysqld mysqld_safe >/dev/null 2>&1; then exit 0; fi\n" + self.config.services.mysql_start
+        self._launch_remote_job(remote, workdir, "mysql-start", command)
+
+    def _wait_remote_job(self, remote: RemoteClient, workdir: str, tag: str, title: str, seconds: int, *, mysql_start: bool = False) -> None:
+        self.logger.info("%s: ожидание до %s с; состояние сохраняется для продолжения.", title, seconds)
+        deadline = time.monotonic() + seconds
+        job = shlex.quote(workdir + "/" + tag)
+        probe = f'''JOB={job}
+if test -s "$JOB.pid" && kill -0 "$(cat "$JOB.pid")" 2>/dev/null; then echo JOB_RUNNING; fi
+test ! -f "$JOB.log" || tail -n 8 "$JOB.log"
+if test -f "$JOB.exit"; then printf 'JOB_EXIT='; cat "$JOB.exit"; fi
+'''
+        if mysql_start:
+            probe += '''if mysqladmin --no-defaults --protocol=socket --connect-timeout=5 ping --silent >/dev/null 2>&1; then echo MYSQL_READY; fi
+if pidof mysqld mysqld_safe >/dev/null 2>&1; then echo MYSQL_PROCESS; fi
+ls -ln /usr/local/mysql/var/ib_logfile* 2>/dev/null || true
+for f in /usr/local/mysql/var/*.err; do test ! -f "$f" || tail -n 8 "$f"; done
+'''
+        while time.monotonic() < deadline:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                raise OperationCancelledError("Ожидание отменено; удалённая операция сохранена для продолжения.")
+            try:
+                result = remote.run(probe, timeout=20, use_sudo=True, get_pty=True, check=False)
+            except Exception as exc:
+                if isinstance(exc, OperationCancelledError):
+                    raise
+                self.logger.warning("%s: касса временно не отвечает (%s). Запись MySQL не прерывается.", title, exc)
+                try:
+                    remote.close()
+                    remote.connect()
+                except Exception as reconnect_exc:
+                    self.logger.warning("Переподключение к кассе пока невозможно: %s", reconnect_exc)
+            else:
+                output = result.stdout.replace("\r", "")
+                if mysql_start and re.search(r"^MYSQL_READY$", output, re.M):
+                    return
+                statuses = re.findall(r"^JOB_EXIT=(\d+)$", output, re.M)
+                if statuses:
+                    if not mysql_start and statuses[0] == "0":
+                        return
+                    if not mysql_start or not re.search(r"^MYSQL_PROCESS$", output, re.M):
+                        raise WorkflowError(f"{title}: удалённая операция завершилась с кодом {statuses[0]}. Журнал: {workdir}/{tag}.log")
+                if not mysql_start and not statuses and "JOB_RUNNING" not in output:
+                    raise RebuildPausedError(f"{title}: нет подтверждения завершения. Повторный импорт заблокирован; проверьте {workdir}/{tag}.log.")
+            if self.cancel_event is not None:
+                self.cancel_event.wait(10)
+            else:
+                time.sleep(10)
+        raise RebuildPausedError(f"{title}: лимит ожидания {seconds} с. MySQL не остановлен. Нажмите «Продолжить прерванную пересборку» позже.")
+
     def _run_rebuild_phase(self, remote: RemoteClient, title: str, command: str, timeout: int, *, get_pty: bool = False) -> None:
         self.logger.info("Фаза пересборки MySQL: %s", title)
         try:
-            remote.run(command, timeout=timeout, get_pty=get_pty or self.config.connection.use_sudo, use_sudo=True)
+            remote.run(command, timeout=timeout, get_pty=True, use_sudo=True)
         except TimeoutError as exc:
             raise WorkflowError(f"Истекло время ожидания фазы «{title}» ({timeout} с).") from exc
 
@@ -163,6 +307,7 @@ if test -f "$WORK/previous_datadir"; then
     fi
     rm -f "$WORK/previous_datadir"
 fi
+rm -f /usr/local/mysql/.dbrepair-rebuild
 '''
 
     def _download_archives_command(self, workdir: str) -> str:
@@ -233,6 +378,11 @@ printf '%s\n' "$BACKUP" > "$WORK/previous_datadir"
 mv "$VAR_DIR" "$BACKUP"
 cp -a "$NEW_VAR" "$VAR_DIR"
 chown -R "$MYSQL_OWNER" "$VAR_DIR"
+stat -c '%d:%i' "$VAR_DIR" > "$WORK/datadir_identity"
+printf '%s\n' ''' + shlex.quote(self.config.database.name) + r''' > "$WORK/database"
+printf '%s\n' datadir_ready > "$WORK/phase"
+printf '%s\n' "$WORK" > /usr/local/mysql/.dbrepair-rebuild.tmp
+mv /usr/local/mysql/.dbrepair-rebuild.tmp /usr/local/mysql/.dbrepair-rebuild
 echo "Предыдущий datadir сохранён: $BACKUP"
 '''
 
@@ -277,7 +427,7 @@ echo "Схема UKM проверена: $TABLE_COUNT таблиц"
 '''
 
     def _start_ukmclient_command(self) -> str:
-        return "set -eu\nTERM=linux " + self.config.services.ukmclient_start + "\n" + """
+        return "set -eu\nif pidof cashmain >/dev/null 2>&1 || pidof ukmclient >/dev/null 2>&1; then exit 0; fi\nTERM=linux " + self.config.services.ukmclient_start + "\n" + """
 i=0; while [ \"$i\" -lt 30 ]; do
     if pidof cashmain >/dev/null 2>&1 || pidof ukmclient >/dev/null 2>&1; then exit 0; fi
     sleep 1
@@ -295,15 +445,15 @@ exit 1"""
             self._run_rebuild_phase(remote, "Проверить подключение UKM к MySQL", self._verify_ukm_database_account_command(), 90)
 
     @contextmanager
-    def _mysql_credentials(self, remote: RemoteClient):
+    def _mysql_credentials(self, remote: RemoteClient, *, credential_dir: str | None = None):
         """Use one proven login for import and verification; never reset root implicitly."""
-        path = f"/tmp/.dbrepair-mysql-client-{uuid.uuid4().hex}.cnf"
+        path = f"{credential_dir or '/tmp'}/.dbrepair-mysql-client-{uuid.uuid4().hex}.cnf"
         try:
             for password in dict.fromkeys((self.config.database.password, "")):
                 escaped = password.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
-                remote.write_private_text(path, f'[client]\nuser=root\npassword="{escaped}"\nprotocol=socket\n')
+                remote.write_private_text(path, f'[client]\nuser=root\npassword="{escaped}"\nprotocol=socket\n', use_sudo=bool(credential_dir))
                 result = remote.run(f"mysql --defaults-file={shlex.quote(path)} -N -e 'SELECT 1'",
-                                    check=False, timeout=30, use_sudo=True)
+                                    check=False, timeout=30, use_sudo=True, get_pty=True)
                 if result.exit_status == 0:
                     if not password:
                         self.logger.warning("MySQL root доступен без пароля (чистый datadir); используется проверенный вход через локальный сокет.")
@@ -314,10 +464,13 @@ exit 1"""
                     raise WorkflowError("Не удалось подключиться к MySQL через локальный сокет. Проверьте запуск MySQL и его журнал.")
             raise WorkflowError("MySQL отклонил пароль root из [database].password и вход без пароля. Укажите действующий пароль MySQL; пароль SSH задаётся отдельно.")
         finally:
-            try:
-                remote.run(f"rm -f {shlex.quote(path)}", check=False, timeout=30, use_sudo=True)
-            except Exception:
-                self.logger.warning("Не удалось удалить закрытый файл доступа MySQL: %s", path)
+            # A detached job may not have read its options yet when the GUI closes.
+            # Keep its 0600 file in WORK until successful completion/rollback.
+            if not credential_dir:
+                try:
+                    remote.run(f"rm -f {shlex.quote(path)}", check=False, timeout=30, use_sudo=True)
+                except Exception:
+                    self.logger.warning("Не удалось удалить закрытый файл доступа MySQL: %s", path)
 
     def _restore_ukm_database_account_command(self, client: str) -> str:
         """Restore the local UKM account from rc.ukm without exposing its password."""
