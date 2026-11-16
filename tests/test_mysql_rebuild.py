@@ -1,165 +1,241 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import threading
 import unittest
+from unittest.mock import Mock
 
 from dbrepair.config import AppConfig, ConnectionConfig, DatabaseConfig, ServiceCommands, WorkflowPaths
-from dbrepair.mysql_rebuild import MYSQL_REBUILD_STEPS, MysqlRebuildWorkflow
+from dbrepair.mysql_rebuild import MysqlRebuildWorkflow, _mysql_ready_command, _mysql_io_guard
+from dbrepair.remote import CommandResult, RemoteClient
 from dbrepair.workflow import WorkflowError
 
 
-class Logger:
-    def info(self, *args) -> None:
-        pass
+class Remote:
+    def __init__(self, results=()):
+        self.commands = []
+        self.written = []
+        self.results = iter(results)
+        self.cancel_event = None
+
+    def run(self, command, **kwargs):
+        self.commands.append((command, kwargs))
+        if "-e 'SELECT 1'" in command:
+            return next(self.results, CommandResult(command, 0, '1\n', ''))
+        return CommandResult(command, 0, '', '')
+
+    def write_private_text(self, path, content):
+        self.written.append((path, content))
 
 
 class MysqlRebuildTests(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self):
         self.config = AppConfig(
-            connection=ConnectionConfig(host="192.168.0.10", username="root", password="secret"),
-            database=DatabaseConfig(name="ukmclient", password="secret"),
+            connection=ConnectionConfig(host="192.168.0.10", username="root", password="ssh-secret"),
+            database=DatabaseConfig(name="ukmclient", password="mysql-secret"),
             paths=WorkflowPaths(Path("repair.tgz"), Path("empty.tgz"), Path("backups")),
-            services=ServiceCommands(),
-            source_path=Path("config.toml"),
+            services=ServiceCommands(), source_path=Path("config.toml"),
         )
-        self.workflow = MysqlRebuildWorkflow(self.config, Logger())
+        self.workflow = MysqlRebuildWorkflow(self.config, Mock())
 
-    def test_rejects_unknown_or_empty_plan(self) -> None:
-        with self.assertRaises(WorkflowError):
-            self.workflow.run_steps([])
-        with self.assertRaises(WorkflowError):
-            self.workflow.run_steps(["unknown"])
+    def test_invalid_inputs(self):
+        for plan in ([], ['unknown']):
+            with self.assertRaises(WorkflowError):
+                self.workflow.run_steps(plan)
+        with self.assertRaises(ValueError):
+            MysqlRebuildWorkflow(replace(self.config, database=DatabaseConfig("ukm';x", "p")), Mock())
+        with self.assertRaises(ValueError):
+            MysqlRebuildWorkflow(self.config, Mock(), source_server='host; exit 0')
 
-    def test_rebuild_is_split_into_observable_safe_phases(self) -> None:
-        class Remote:
-            def __init__(self) -> None:
-                self.commands: list[tuple[str, dict]] = []
-                self.written: list[tuple[str, str]] = []
+    def test_manual_source_and_trusted_archives(self):
+        w = MysqlRebuildWorkflow(self.config, Mock(), source_server='192.168.117.75')
+        script = w._preflight_command()
+        self.assertIn('manual_server=192.168.117.75', script)
+        self.assertNotIn('. "$RC"', script)
+        self.assertNotIn('tar tzf', script)
 
-            def run(self, command: str, **kwargs) -> None:
-                self.commands.append((command, kwargs))
-
-            def write_text(self, path: str, content: str) -> None:
-                self.written.append((path, content))
-
+    def test_rebuild_preflights_and_uses_sudo_and_one_login(self):
         remote = Remote()
         self.workflow._rebuild(remote)
-        commands = [command for command, _kwargs in remote.commands]
-        self.assertGreaterEqual(len(commands), 15)
-        self.assertIn('wget -q --timeout=30 --tries=2', commands[0])
-        self.assertEqual(remote.commands[0][1]["timeout"], 300)
-        self.assertIn("tar xzf ukmcli-build.tgz", commands[1])
-        self.assertNotIn("tar tzf", commands[1])
-        self.assertEqual(remote.commands[1][1]["timeout"], 900)
-        self.assertIn("find \"$WORK\" -type d -path '*/usr/local/mysql*/var' -print | sed -n '1p'", commands[2])
-        self.assertEqual(remote.commands[2][1]["timeout"], 90)
-        self.assertNotIn("-print -quit", commands[2])
-        self.assertNotIn('. "$RC"', commands[0])
-        self.assertEqual('/etc/init.d/ukmclient stop', commands[3])
-        self.assertEqual('/etc/init.d/mysql stop', commands[4])
-        self.assertIn('mv "$VAR_DIR" "$BACKUP"', commands[5])
-        self.assertEqual('/etc/init.d/mysql start', commands[6])
-        self.assertEqual(remote.commands[6][1]["timeout"], 300)
-        self.assertIn('_mysql_ready_command', MysqlRebuildWorkflow._rebuild.__code__.co_names)
-        self.assertIn('mysql "$DB_NAME" < "$SCHEMA_DUMP"', commands[8])
-        self.assertIn('CHARACTER SET utf8 COLLATE utf8_general_ci', commands[8])
-        self.assertIn('incoming Cyrillic data would be converted to question marks', commands[8])
-        self.assertNotIn('CHARACTER SET latin1', '\n'.join(commands))
-        self.assertIn('mysql "$DB_NAME" < "$VERSION_DUMP"', commands[9])
-        self.assertIn("SHOW TABLES LIKE 'trm_in_store'", commands[10])
-        self.assertIn('UKM database charset must be utf8', commands[10])
-        self.assertIn('UKM cashier names must use utf8', commands[10])
-        self.assertIn("GRANT ALL PRIVILEGES ON \\`$DB_NAME\\`.*", commands[11])
-        self.assertIn('read_rc_value() { grep "^$1=" "$RC"', commands[11])
-        self.assertNotIn(self.config.database.password, commands[11])
-        self.assertIn('TERM=linux /etc/init.d/ukmclient start', commands[12])
-        self.assertIn('mysql --defaults-extra-file="$CLIENT_FILE" -D "$DB_NAME"', commands[13])
-        self.assertIn('pidof cashmain', commands[13])
-        self.assertIn('rm -rf /tmp/dbrepair-mysql-rebuild-', commands[-1])
+        commands = [c for c, _ in remote.commands]
+        self.assertIn('id -u', commands[0])
+        self.assertTrue(all(kwargs['use_sudo'] for _, kwargs in remote.commands))
+        client = remote.written[0][0]
+        for marker in ('< "$SCHEMA_DUMP"', '< "$VERSION_DUMP"', 'GRANT ALL PRIVILEGES', 'DEFAULT_CHARACTER_SET_NAME'):
+            self.assertIn(f'--defaults-file={client}', next(c for c in commands if marker in c))
+        self.assertNotIn('mysql-secret', '\n'.join(commands))
+        self.assertNotIn('ssh-secret', '\n'.join(commands))
+        self.assertTrue(commands[-1].startswith('rm -rf /tmp/dbrepair-mysql-rebuild-'))
 
-    def test_phase_timeout_names_the_stuck_phase(self) -> None:
-        class Remote:
-            def run(self, command: str, **kwargs) -> None:
-                del command, kwargs
-                raise TimeoutError("late response")
-
-        with self.assertRaisesRegex(WorkflowError, "Подготовить архивы"):
-            self.workflow._run_rebuild_phase(Remote(), "Подготовить архивы", "true", 10)
-
-    def test_plan_has_preflight_rebuild_and_verify(self) -> None:
-        self.assertEqual([step.step_id for step in MYSQL_REBUILD_STEPS], ["preflight", "rebuild", "verify"])
-
-    def test_verify_uses_a_private_client_file(self) -> None:
-        class Remote:
-            def __init__(self) -> None:
-                self.written: list[tuple[str, str]] = []
-                self.commands: list[tuple[str, dict]] = []
-
-            def write_text(self, path: str, content: str) -> None:
-                self.written.append((path, content))
-
-            def run(self, command: str, **kwargs) -> None:
-                self.commands.append((command, kwargs))
-
+    def test_verify_checks_schema_and_login_before_start(self):
         remote = Remote()
         self.workflow._verify_with_database_password(remote)
-        path, client_config = remote.written[0]
-        self.assertIn('password="secret"', client_config)
-        self.assertIn(f"chmod 600 {path}", remote.commands[0][0])
-        self.assertIn(f"--defaults-extra-file={path}", remote.commands[1][0])
-        self.assertIn("SHOW TABLES LIKE 'trm_in_store'", remote.commands[1][0])
-        self.assertIn("TERM=linux /etc/init.d/ukmclient start", remote.commands[1][0])
-        self.assertIn("pidof cashmain", remote.commands[1][0])
-        self.assertTrue(remote.commands[1][1]["get_pty"])
-        self.assertNotIn(self.config.database.password, remote.commands[1][0])
-        self.assertIn(f"rm -f {path}", remote.commands[2][0])
+        commands = [c for c, _ in remote.commands]
+        schema = next(i for i,c in enumerate(commands) if 'DEFAULT_CHARACTER_SET_NAME' in c)
+        start = next(i for i,c in enumerate(commands) if '/etc/init.d/ukmclient start' in c)
+        login = next(i for i,c in enumerate(commands) if 'protocol=tcp' in c)
+        self.assertLess(schema, start)
+        self.assertLess(login, start)
+        self.assertIn('UKM cashier names must use utf8', commands[schema])
 
-    def test_preflight_command_is_a_complete_shell_script(self) -> None:
-        command = self.workflow._preflight_command()
-        self.assertTrue(command.rstrip().endswith('echo Source: http://$server/ukminstall'))
-        self.assertIn('fail() { echo "Preflight failed: $1" >&2; exit 1; }', command)
-        self.assertIn('cannot download ukm-root.tar.gz from $server', command)
-        self.assertIn('ukmcli-build.tgz does not contain ukm.sql', command)
-        self.assertIn('mysqld is waiting for disk I/O (D state)', command)
-        self.assertIn("ps -o stat= -C mysqld", command)
-        self.assertIn("awk -F=", command)
-        self.assertIn("netstat -tn", command)
-        self.assertIn('no established remote MySQL peer was found by netstat', command)
-        self.assertIn('multiple remote MySQL peers found', command)
-        self.assertNotIn('. "$RC"', command)
+    def test_password_fallback_only_on_1045(self):
+        denied = CommandResult('', 1, '', 'ERROR 1045: Access denied')
+        remote = Remote([denied])
+        with self.workflow._mysql_credentials(remote):
+            pass
+        self.assertEqual(len(remote.written), 2)
+        self.assertIn('password="mysql-secret"', remote.written[0][1])
+        self.assertIn('password=""', remote.written[1][1])
+        self.assertIn('protocol=socket', remote.written[1][1])
+        self.assertIn('rm -f', remote.commands[-1][0])
+        with self.assertRaisesRegex(WorkflowError, r'\[database\].password'):
+            with self.workflow._mysql_credentials(Remote([denied, denied])):
+                self.fail('must not yield')
+        remote = Remote([CommandResult('', 1, '', 'ERROR 2002: no socket')])
+        with self.assertRaisesRegex(WorkflowError, 'локальный сокет'):
+            with self.workflow._mysql_credentials(remote):
+                self.fail('must not yield')
+        self.assertEqual(len(remote.written), 1)
 
-    def test_manual_source_server_takes_priority_over_netstat(self) -> None:
-        workflow = MysqlRebuildWorkflow(self.config, Logger(), source_server="192.168.51.175")
-        command = workflow._preflight_command()
-        self.assertIn("manual_server=192.168.51.175", command)
-        self.assertIn("source_method='manual input'", command)
-        self.assertIn('if test -z "${server:-}" && test -r "$RC"', command)
-        self.assertIn('if test -z "${server:-}"; then', command)
+    def test_credential_escaping_and_no_retry_on_import_error(self):
+        w = MysqlRebuildWorkflow(replace(self.config, database=DatabaseConfig('ukmclient', 'a\\b"c\nd')), Mock())
+        remote = Remote()
+        with self.assertRaisesRegex(RuntimeError, 'import failed'):
+            with w._mysql_credentials(remote):
+                raise RuntimeError('import failed')
+        self.assertEqual(len(remote.written), 1)
+        self.assertIn('password="a\\\\b\\"c\\nd"', remote.written[0][1])
+        self.assertIn('rm -f', remote.commands[-1][0])
 
-    def test_rejects_unsafe_manual_source_server(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Адрес сервера UKM"):
-            MysqlRebuildWorkflow(self.config, Logger(), source_server="server; rm -rf /")
+    def test_failed_rollback_preserves_workdir_and_diagnoses_mysql(self):
+        remote = Remote()
+        original = remote.run
+        def run(command, **kwargs):
+            if command == self.config.services.mysql_start:
+                raise TimeoutError('disk blocked')
+            return original(command, **kwargs)
+        remote.run = run
+        self.workflow._restore_services = Mock(return_value=False)
+        with self.assertRaisesRegex(WorkflowError, 'Запустить MySQL'):
+            self.workflow._rebuild(remote)
+        self.workflow._restore_services.assert_called_once()
+        self.assertFalse(any(c.startswith('rm -rf /tmp/dbrepair-mysql-rebuild-') for c,_ in remote.commands))
+        self.assertTrue(any('tail -n 60' in c for c,_ in remote.commands))
 
-    def test_restore_account_uses_rc_ukm_and_scoped_privileges(self) -> None:
-        command = self.workflow._restore_ukm_database_account_command()
-        self.assertIn('RC=/usr/local/ukmclient/rc.ukm', command)
-        self.assertIn('read_rc_value() { grep "^$1=" "$RC"', command)
-        self.assertIn("GRANT ALL PRIVILEGES ON \\`$DB_NAME\\`.*", command)
-        self.assertIn('WITH GRANT OPTION', command)
-        self.assertIn('GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.*', command)
-        self.assertIn('GRANT RELOAD ON *.*', command)
-        self.assertNotIn('DELETE FROM mysql.', command)
-        self.assertNotIn(self.config.database.password, command)
+    def test_recovery_can_run_after_cancellation(self):
+        remote = Remote()
+        event = threading.Event()
+        event.set()
+        remote.cancel_event = event
+        original = remote.run
+        def run(command, **kwargs):
+            self.assertIsNone(remote.cancel_event)
+            return original(command, **kwargs)
+        remote.run = run
+        self.assertTrue(self.workflow._restore_services(remote, '/tmp/dbrepair-mysql-rebuild-test'))
+        self.assertIs(remote.cancel_event, event)
 
-    def test_verify_account_uses_private_file_and_cashmain(self) -> None:
-        command = self.workflow._verify_ukm_database_account_command()
-        self.assertIn('mktemp /tmp/.dbrepair-ukm-client.XXXXXX', command)
-        self.assertIn('mysql --defaults-extra-file="$CLIENT_FILE" -D "$DB_NAME"', command)
-        self.assertIn("SHOW TABLES LIKE 'trm_in_store'", command)
-        self.assertIn('SELECT User FROM mysql.db', command)
-        self.assertIn('pidof cashmain', command)
-        self.assertNotIn(self.config.database.password, command)
+    def test_private_file_mode_precedes_password_write(self):
+        remote = RemoteClient(self.config.connection, Mock())
+        file = Mock()
+        file.__enter__ = Mock(return_value=file)
+        file.__exit__ = Mock(return_value=False)
+        remote._sftp = Mock()
+        remote._sftp.file.return_value = file
+        remote.write_private_text('/tmp/test', 'secret')
+        remote._sftp.file.assert_called_once_with('/tmp/test', mode='wx')
+        self.assertEqual(file.method_calls, [('chmod', (0o600,), {}), ('write', (b'secret',), {})])
+
+    def test_generated_scripts_parse(self):
+        sh = shutil.which('sh') or r'C:\Program Files\Git\bin\sh.exe'
+        w = self.workflow
+        commands = [w._preflight_command(), w._download_archives_command('/tmp/work'),
+                    w._extract_archives_command('/tmp/work'), w._prepare_datadir_command('/tmp/work'),
+                    w._replace_datadir_command('/tmp/work'), w._rollback_command('/tmp/work'),
+                    w._stop_mysql_command(), w._import_schema_command('/tmp/work', '/tmp/client'),
+                    w._import_version_command('/tmp/work', '/tmp/client'), w._schema_check_command('/tmp/client'),
+                    w._restore_ukm_database_account_command('/tmp/client'), w._verify_ukm_database_account_command(),
+                    w._start_ukmclient_command(), _mysql_ready_command(1)]
+        for command in commands:
+            with self.subTest(command=command[:60]):
+                result = subprocess.run([sh, '-n'], input=command, text=True, encoding='utf-8', capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_copy_failure_and_owner_repair_and_rollback(self):
+        sh = shutil.which('sh') or r'C:\Program Files\Git\bin\sh.exe'
+        for fail_copy in (True, False):
+            with self.subTest(fail_copy=fail_copy), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                mysql = root / 'mysql'
+                (mysql / 'var').mkdir(parents=True)
+                (mysql / 'var' / 'original').write_text('old')
+                new = root / 'archive'
+                new.mkdir()
+                (new / 'replacement').write_text('new')
+                work = root / 'work'
+                work.mkdir()
+                (work / 'new_var').write_text(new.as_posix())
+                w = MysqlRebuildWorkflow(replace(self.config, services=ServiceCommands(mysql_stop='true', mysql_start='true', ukmclient_stop='true', ukmclient_start='true')), Mock())
+                script = w._replace_datadir_command(work.as_posix()).replace('/usr/local/mysql', mysql.as_posix())
+                shim = 'pidof() { return 1; }\nchown() { echo owner-normalized; }\n'
+                if fail_copy:
+                    shim += 'cp() { return 44; }\n'
+                result = subprocess.run([sh, '-s'], input=shim+script, text=True, encoding='utf-8', capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 44 if fail_copy else 0, result.stderr)
+                self.assertTrue((work / 'previous_datadir').exists())
+                self.assertTrue((mysql / 'var_bad0' / 'original').exists())
+                if not fail_copy:
+                    self.assertIn('owner-normalized', result.stdout)
+                script = w._rollback_command(work.as_posix()).replace('/usr/local/mysql', mysql.as_posix())
+                result = subprocess.run([sh, '-s'], input='pidof() { return 1; }\n'+script, text=True, encoding='utf-8', capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((mysql / 'var' / 'original').exists())
+                self.assertFalse((work / 'previous_datadir').exists())
+                if not fail_copy:
+                    self.assertEqual(len(list(mysql.glob('var_bad0.failed-*'))), 1)
+
+    def test_running_mysql_prevents_datadir_change(self):
+        sh = shutil.which('sh') or r'C:\Program Files\Git\bin\sh.exe'
+        script = self.workflow._stop_mysql_command().replace(self.config.services.mysql_stop, 'true')
+        result = subprocess.run([sh, '-s'], input='pidof() { return 0; }\nsleep() { :; }\n'+script,
+                                text=True, encoding='utf-8', capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('замена datadir запрещена', result.stderr)
+
+    def test_transient_and_persistent_io_wait(self):
+        sh = shutil.which('sh') or r'C:\Program Files\Git\bin\sh.exe'
+        for persistent in (False, True):
+            shim = 'pidof() { echo 123; }\nsleep() { :; }\nsamples=0\n'
+            shim += 'grep() { samples=$((samples + 1)); '
+            shim += 'return 0; }\n' if persistent else 'test "$samples" -eq 1; }\n'
+            result = subprocess.run([sh, '-s'], input=shim+_mysql_io_guard(), text=True, encoding='utf-8',
+                                    capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 1 if persistent else 0, result.stderr)
+
+    def test_account_sql_and_client_options_preserve_special_password(self):
+        sh = shutil.which('sh') or r'C:\Program Files\Git\bin\sh.exe'
+        with tempfile.TemporaryDirectory() as directory:
+            rc = Path(directory) / 'rc.ukm'
+            rc.write_text("base=ukmclient\nuser=ukm_terminal\npassword=pa'ss\\word\"#\n")
+            command = self.workflow._restore_ukm_database_account_command('/tmp/test.cnf')
+            command = command.replace('/usr/local/ukmclient/rc.ukm', rc.as_posix())
+            result = subprocess.run([sh, '-s'], input='mysql() { cat; }\n'+command, text=True,
+                                    encoding='utf-8', capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("IDENTIFIED BY 'pa\\'ss\\\\word\"#'", result.stdout)
+            command = self.workflow._verify_ukm_database_account_command(check_process=False)
+            command = command.replace('/usr/local/ukmclient/rc.ukm', rc.as_posix())
+            # Inspect the options before the script's trap removes them.
+            shim = 'mysql() { case "$*" in *"SHOW TABLES"*) echo trm_in_store;; *) cat "${1#--defaults-file=}";; esac; }\n'
+            result = subprocess.run([sh, '-s'], input=shim+command.replace('>/dev/null\ni=0', '\ni=0').replace("LIMIT 1\" >/dev/null", "LIMIT 1\""),
+                                    text=True, encoding='utf-8', capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('password="pa\'ss\\\\word\\"#"', result.stdout)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

@@ -140,6 +140,10 @@ class RemoteClient:
 
                 if deadline is not None and time.monotonic() > deadline:
                     channel.close()
+                    if out_chunks:
+                        self.logger.info("STDOUT %s", "".join(out_chunks).strip())
+                    if err_chunks:
+                        self.logger.warning("STDERR %s", "".join(err_chunks).strip())
                     raise TimeoutError(f"Remote command timed out after {timeout} seconds: {command}")
 
                 time.sleep(0.1)
@@ -226,6 +230,13 @@ class RemoteClient:
             return
 
         self._require_sftp().put(str(local_path), remote_path, callback=self._transfer_callback)
+
+    def write_private_text(self, remote_path: str, content: str) -> None:
+        """Create a new credentials file with mode 0600 before writing secrets."""
+        self._raise_if_cancelled()
+        with self._require_sftp().file(remote_path, mode="wx") as remote_file:
+            remote_file.chmod(0o600)
+            remote_file.write(content.encode("utf-8"))
 
     def download(self, remote_path: str, local_path: Path, *, use_sudo: bool = False) -> None:
         self._raise_if_cancelled()
